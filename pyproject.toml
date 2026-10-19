@@ -1,0 +1,45 @@
+[project]
+name = "toonball"
+version = "0.1.0"
+description = "Re-render real football broadcasts as a cartoon game world"
+requires-python = ">=3.11,<3.13"
+dependencies = [
+    "numpy>=1.26,<2.3",
+    "opencv-python-headless>=4.10",
+    "torch>=2.5,<2.6",
+    "torchvision>=0.20,<0.21",
+    "ultralytics>=8.3",        # roboflow/sports YOLOv8 football weights
+    "supervision>=0.25,<0.27",  # keeps sv.ByteTrack
+    "transformers>=4.46,<4.50", # torch 2.5 compatible; SigLIP embeddings for team assignment
+    "umap-learn>=0.5.6",
+    "scikit-learn>=1.5",
+    "scipy>=1.13",
+    "polars>=1.12",            # artifact store
+    "pyarrow>=18",
+    "pyyaml>=6",
+    "typer>=0.15",
+    "tqdm>=4.66",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.7"]
+
+[project.scripts]
+toonball = "toonball.cli:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.ruff]
+line-length = 100
+
+# NVIDIA driver here is CUDA 12.2 -> use cu121 wheels
+[[tool.uv.index]]
+name = "pytorch-cu121"
+url = "https://download.pytorch.org/whl/cu121"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu121" }
+torchvision = { index = "pytorch-cu121" }

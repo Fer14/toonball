@@ -1,0 +1,7 @@
+runs/
+weights/
+clips/
+__pycache__/
+*.pyc
+.venv/
+node_modules/

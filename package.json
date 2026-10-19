@@ -1,0 +1,9 @@
+{
+  "name": "toonball-viewer",
+  "private": true,
+  "type": "module",
+  "dependencies": {
+    "three": "0.170.0",
+    "playwright": "1.49.1"
+  }
+}
