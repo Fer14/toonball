@@ -1,7 +1,7 @@
 // Frame-stepped capture of the game viewer → MP4, then composite with the broadcast.
 // usage: node scripts/record.mjs <run_dir> [wii|toy] [pip|side|game]
 import { spawn } from "node:child_process";
-import { createReadStream, existsSync, statSync } from "node:fs";
+import { createReadStream, existsSync, mkdirSync, statSync } from "node:fs";
 import http from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -13,7 +13,7 @@ const W = 1600, H = 900;
 const runRel = "/" + path.relative(ROOT, runDir).split(path.sep).join("/");
 
 const TYPES = { ".html": "text/html", ".js": "text/javascript", ".json": "application/json",
-                ".mp4": "video/mp4" };
+                ".mp4": "video/mp4", ".jpg": "image/jpeg" };
 const server = http.createServer((req, res) => {
   const p = path.join(ROOT, decodeURIComponent(new URL(req.url, "http://x").pathname));
   if (!p.startsWith(ROOT) || !existsSync(p) || statSync(p).isDirectory()) {
@@ -34,14 +34,15 @@ page.on("console", (m) => m.type() === "error" && console.error("[page]", m.text
 page.on("pageerror", (e) => console.error("[page]", e.message));
 let videoParam = "";
 if (layout !== "game") {
-  // the page itself shows the real match (exactly as in the viewer); Chromium needs WebM
-  const webm = path.join(runDir, "clip_rec.webm");
-  if (!existsSync(webm)) {
+  // the page itself shows the real match (same layout as the viewer), one image per frame
+  const dir = path.join(runDir, "rec_frames");
+  if (!existsSync(path.join(dir, "00001.jpg"))) {
+    mkdirSync(dir, { recursive: true });
     await new Promise((r, j) => spawn("ffmpeg", ["-v", "error", "-y", "-i", path.join(runDir, "clip.mp4"),
-      "-vf", "scale=960:-2", "-c:v", "libvpx-vp9", "-b:v", "3M", "-deadline", "realtime", "-cpu-used", "8",
-      "-row-mt", "1", "-an", webm], { stdio: "inherit" }).on("close", (c) => (c ? j(new Error(`ffmpeg ${c}`)) : r())));
+      "-vf", "scale=960:-2", "-q:v", "3", path.join(dir, "%05d.jpg")], { stdio: "inherit" })
+      .on("close", (c) => (c ? j(new Error(`ffmpeg ${c}`)) : r())));
   }
-  videoParam = "&video=clip_rec.webm";
+  videoParam = "&frames=rec_frames";
 }
 await page.goto(`http://127.0.0.1:${port}/viewer/index.html?run=${runRel}&theme=${theme}&layout=${layout}&record=1${videoParam}`);
 await page.waitForFunction(() => window.__ready === true, null, { timeout: 120000 });

@@ -669,15 +669,16 @@ function update(f) {
 window.__N = N;
 window.__fps = FPS;
 window.__step = (f) => { update(f); return true; };
-// recording with the real match inset: seek the <video> to the frame, then draw the game frame
-window.__seekStep = (f) => new Promise((resolve) => {
-  const video = document.getElementById("broadcast");
-  const done = () => { update(f); requestAnimationFrame(() => resolve(true)); };
-  const t = (f + 0.5) / FPS;
-  if (Math.abs(video.currentTime - t) < 1e-3 && video.readyState >= 2) return done();
-  video.addEventListener("seeked", done, { once: true });
-  video.currentTime = t;
-});
+// recording with the real match inset: headless Chromium doesn't repaint a seeked <video>
+// before screenshots, so the inset shows one extracted image per frame instead
+window.__seekStep = async (f) => {
+  const img = document.getElementById("broadcast");
+  img.src = `${RUN}/${P.get("frames")}/${String(f + 1).padStart(5, "0")}.jpg`;
+  await img.decode();
+  update(f);
+  await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+  return true;
+};
 window.__frame = (f, q = 0.92) => { update(f); return renderer.domElement.toDataURL("image/jpeg", q); };
 
 if (!RECORD) {
@@ -704,10 +705,8 @@ if (!RECORD) {
   video.play().catch(() => {});
 }
 if (RECORD && LAYOUT !== "game") {
-  // headless Chromium has no H.264: the recorder passes a WebM copy of the clip
-  const video = document.getElementById("broadcast");
-  video.src = `${RUN}/${P.get("video") || scene_.video}`;
-  video.addEventListener("loadeddata", () => (window.__ready = true), { once: true });
-} else {
-  window.__ready = true;
+  const img = document.createElement("img");  // same id → same CSS as the <video>
+  img.id = "broadcast";
+  document.getElementById("broadcast").replaceWith(img);
 }
+window.__ready = true;
