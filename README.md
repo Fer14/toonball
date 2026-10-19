@@ -8,16 +8,10 @@ Both were driven by tracking data from stadium-wide camera rigs. toonball recove
 from **one ordinary broadcast video** — who is where, which team, where the ball is and how high
 it flies — and replays it in a Three.js game world.
 
-<table>
-<tr>
-<td><img src="docs/121364_0.gif" alt="toonball demo, Bundesliga clip 121364_0"></td>
-<td><img src="docs/573e61_0.gif" alt="toonball demo, Bundesliga clip 573e61_0"></td>
-</tr>
-<tr>
-<td><img src="docs/0bfacc_0.gif" alt="toonball demo, Bundesliga clip 0bfacc_0"></td>
-<td><img src="docs/08fd33_0.gif" alt="toonball demo, Bundesliga clip 08fd33_0"></td>
-</tr>
-</table>
+<p align="center"><img src="docs/121364_0.gif" width="100%" alt="toonball demo, Bundesliga clip 121364_0"></p>
+<p align="center"><img src="docs/573e61_0.gif" width="100%" alt="toonball demo, Bundesliga clip 573e61_0"></p>
+<p align="center"><img src="docs/0bfacc_0.gif" width="100%" alt="toonball demo, Bundesliga clip 0bfacc_0"></p>
+<p align="center"><img src="docs/08fd33_0.gif" width="100%" alt="toonball demo, Bundesliga clip 08fd33_0"></p>
 
 Cartoon = toonball's reconstruction; bottom-right = the real broadcast it was computed from.
 Full 30 s videos: [121364_0](docs/121364_0.mp4) · [573e61_0](docs/573e61_0.mp4) ·
