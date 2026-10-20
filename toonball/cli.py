@@ -98,16 +98,24 @@ def _pipeline(store, force: bool = False, pose_on: bool = True) -> dict:
             R_cam = lift.camera_rotations(cams.P, size)
             for t in w.tracks:
                 t.pose3d = lift.lift_track(lifter, t, kps, R_cam, fps)
+
+    # full teams: every player exists for the whole clip, also while off camera
+    from toonball.track import offscreen
+    w.tracks, remap = offscreen.fill(w.tracks, H, size, fps, (w.ball_x, w.ball_y))
+    w.owner = np.array([remap.get(int(o), -1) if o >= 0 else -1 for o in w.owner])
+    w.kicks = [(f, remap[i]) for f, i in w.kicks if i in remap]
     store.put_df("state", world.to_frame(w))
     store.put_json("flights", w.flights)
     export(w, store.path("scene.json"), "clip.mp4")
     ball_ok = float(np.isfinite(w.ball_x[w.calibrated]).mean()) if w.calibrated.any() else 0.0
     gks = sum(t.role == "goalkeeper" for t in w.tracks)
+    per_team = [sum(t.team == k and t.role != "referee" for t in w.tracks) for k in (0, 1)]
     summary = {"calibrated": float(np.isfinite(H[:, 0, 0]).mean()), "tracks": len(w.tracks),
                "ball": ball_ok, "kicks": len(w.kicks), "flights": len(w.flights)}
     typer.echo(f"  {store.dir.name}: calibrated {summary['calibrated']:.0%}  tracks "
                f"{summary['tracks']} (gk {gks})  ball {summary['ball']:.0%}  kicks "
-               f"{summary['kicks']}  3D flights {len(w.flights)}  camera err {err:.0f}px")
+               f"{summary['kicks']}  3D flights {len(w.flights)}  camera err {err:.0f}px  "
+               f"team sizes {per_team[0]}+{per_team[1]}")
     return summary
 
 

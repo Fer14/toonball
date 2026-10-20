@@ -976,6 +976,11 @@ function update(f) {
   const zMax = W / 2 + 3 - nearReach;
   camTarget.set(clamp(cx, -L / 2 + 5, L / 2 - 5), 0, clamp(cz, Math.min(-W / 2 + 10, zMax), zMax));
   camPos.set(lerp(camTarget.x, 0, 0.25), dist * Math.sin(elev), camTarget.z + dist * Math.cos(elev));
+  // ?cam=wide: whole-pitch view (shows the players the broadcast camera doesn't see)
+  if (P.get("cam") === "wide") {
+    camTarget.set(0, 0, 2);
+    camPos.set(0, 72, 92);
+  }
   // ?focus=<player id>: close-up camera on one player (to inspect the pose)
   const fp = FOCUS == null ? null : players.find((q) => q.p.id === FOCUS);
   if (fp && fp.root.visible) {

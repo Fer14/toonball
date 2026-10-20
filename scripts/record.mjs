@@ -44,7 +44,8 @@ if (layout !== "game") {
   }
   videoParam = "&frames=rec_frames";
 }
-await page.goto(`http://127.0.0.1:${port}/viewer/index.html?run=${runRel}&theme=${theme}&layout=${layout}&record=1${videoParam}`);
+// VIEW: extra viewer query, e.g. VIEW="&cam=wide" for the whole-pitch camera
+await page.goto(`http://127.0.0.1:${port}/viewer/index.html?run=${runRel}&theme=${theme}&layout=${layout}&record=1${videoParam}${process.env.VIEW || ""}`);
 await page.waitForFunction(() => window.__ready === true, null, { timeout: 120000 });
 const n = Math.min(await page.evaluate(() => window.__N), Number(process.env.MAX_FRAMES || Infinity));
 const fps = await page.evaluate(() => window.__fps);
