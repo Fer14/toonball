@@ -26,6 +26,7 @@ from toonball.track.players import Track, _on_pitch
 
 G = 9.81
 R_BALL = 0.11
+HEAD = 2.2   # m: above this nobody controls the ball (a header reaches ~2–2.5 m)
 
 
 @dataclass
@@ -302,9 +303,13 @@ def build_ball(ball_raw: pl.DataFrame, H: np.ndarray, P: np.ndarray | None,
         for j, (a, b, t0, p, apex, rms, rms_g) in enumerate(accepted):
             lo = accepted[j - 1][1] + 1 if j else 0
             hi = accepted[j + 1][0] - 1 if j + 1 < len(accepted) else F - 1
-            while a > lo and owner[a - 1] == -1 and _z(p, (a - 1 - t0) / fps) > R_BALL:
+            # also through "possessions" of a ball above head height: those are only the
+            # ball passing over a player in the image
+            def free(g, p=p, t0=t0):
+                return owner[g] == -1 or _z(p, (g - t0) / fps) > HEAD
+            while a > lo and free(a - 1) and _z(p, (a - 1 - t0) / fps) > R_BALL:
                 a -= 1
-            while b < hi and owner[b + 1] == -1 and _z(p, (b + 1 - t0) / fps) > R_BALL:
+            while b < hi and free(b + 1) and _z(p, (b + 1 - t0) / fps) > R_BALL:
                 b += 1
             accepted[j] = (a, b, t0, p, apex, rms, rms_g)
             t = (np.arange(a, b + 1) - t0) / fps

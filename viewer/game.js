@@ -55,8 +55,29 @@ const cam = {
   y: smooth(camY.map((v, i) => lerp(v, ballY[i], 0.6)), Math.round(FPS * 1.5)),
   w: smooth(fillNulls(scene_.camera.w), Math.round(FPS * 2)),
 };
-const kicksAt = new Map();                  // player id -> [frames]
-for (const [f, id] of scene_.kicks) (kicksAt.get(id) ?? kicksAt.set(id, []).get(id)).push(f);
+// ball touches: every release (the frame the ball leaves a player) becomes a body action —
+// kick, header, throw-in or keeper throw — timed so the contact happens on that frame
+const touchesAt = new Map();                // player id -> [{ f, type, leg, at }]
+const onPitch = (x, y) => x > 0.3 && x < L - 0.3 && y > 0.3 && y < W - 0.3;
+for (const [f, id] of scene_.kicks) {
+  const p = scene_.players.find((q) => q.id === id);
+  if (!p) continue;
+  const z = (g) => ball.z[clamp(g, 0, N - 1)] ?? 0;
+  const i = clamp(f - p.start, 0, p.x.length - 1);
+  let type = "kick";
+  if (ball.hands?.[f - 1]) {
+    const g = Math.min(N - 1, f + Math.round(FPS));
+    const dist = Math.hypot((ball.x[g] ?? ball.x[f]) - ball.x[f], (ball.y[g] ?? ball.y[f]) - ball.y[f]);
+    type = dist > 25 ? "kick" : "throw";            // keeper: punt long, throw short
+  } else if (!onPitch(p.x[i], p.y[i])) {
+    type = "throw";                                 // throw-in
+  } else if (Math.max(z(f - 1), z(f), z(f + 1)) > 1.3 && Math.max(z(f - 1), z(f), z(f + 1)) < 2.8) {
+    type = "header";                                // ball at head height
+  }
+  (touchesAt.get(id) ?? touchesAt.set(id, []).get(id)).push({ f, type, leg: 1, at: null });
+}
+// timing of each action around its contact frame (seconds before / after)
+const ACTION = { kick: [0.25, 0.3], header: [0.3, 0.3], throw: [0.45, 0.3] };
 
 // ball speed per frame (m/s), used for goalkeeper dives
 const ballSpeed = new Float32Array(N);
@@ -504,7 +525,7 @@ function makePlayer(p) {
   root.scale.setScalar(SCALE);
   scene.add(root);
   return { p, root, body, pelvis, chest, legs, knees, arms, elbows, head, base, mats,
-           kicks: kicksAt.get(p.id) ?? [] };
+           touches: touchesAt.get(p.id) ?? [] };
 }
 
 const players = scene_.players.map(makePlayer);
@@ -604,14 +625,35 @@ function updatePlayer(pl, f) {
   const w3 = pose3dWeight(p, i);
   if (p.role === "goalkeeper" && w3 < 0.5) animateKeeper(pl, f, i, speed, ph, baseY);
 
-  for (const kf of w3 < 0.5 ? pl.kicks : []) {  // scripted kick: foot strikes at the release
-    const k = (f - kf) / (0.35 * FPS) + 0.3;
-    if (k >= -0.4 && k <= 1) {
-      const a = k < 0 ? -1.1 * (k + 0.4) / 0.4 : lerp(-1.1, 1.3, Math.sin(k * Math.PI / 2));
-      pl.legs[1].rotation.x = -a;
-      pl.arms[0].rotation.x = 0.7;
-      pl.arms[1].rotation.x = -0.5;
-      pl.body.rotation.x = -0.15;
+  pl.action = null;
+  pl.actionLeg = -1;
+  for (const t of pl.touches) {               // body action, contact exactly on the release
+    const [pre, post] = ACTION[t.type];
+    const u = (f - t.f) / FPS;                 // seconds from contact
+    if (u < -pre || u > post) continue;
+    const k = u < 0 ? u / pre : u / post;      // −1 … 0 (contact) … 1
+    pl.action = t.type;
+    if (t.type === "kick") {                   // wind back, strike through the ball, follow
+      // leg angle: backward + (wound up at −1), vertical at the contact, forward after
+      pl.legs[t.leg].rotation.set(k < 0 ? -1.1 * k : -1.3 * Math.sin(k * Math.PI / 2), 0, 0);
+      pl.actionLeg = t.leg;
+      pl.knees[t.leg].rotation.set(k < 0 ? 1.0 * -k : 0.1, 0, 0);
+      pl.arms[1 - t.leg].rotation.x = -0.7;
+      pl.arms[t.leg].rotation.x = 0.4;
+      pl.body.rotation.x = -0.12;
+    } else if (t.type === "header") {          // lean back, spring up, nod into the ball
+      const up = Math.max(0, Math.cos(k * Math.PI / 2));
+      pl.body.position.y += 0.22 * up;
+      pl.body.rotation.x = k < 0 ? 0.3 * k : 0.35 * Math.sin(Math.min(k * 2, 1) * Math.PI / 2);
+      pl.head.rotation.x = k < 0 ? 0.35 * k : 0.45 * (1 - k);
+      for (const arm of pl.arms) arm.rotation.x = -0.9 * up;
+    } else {                                   // throw: ball overhead with both hands
+      const back = k < 0 ? -2.9 - 0.3 * (1 + k) : lerp(-2.9, -1.2, Math.min(1, k * 1.5));
+      for (const [m, sx] of [[0, -1], [1, 1]]) {
+        pl.arms[m].rotation.set(back, 0, 0.12 * sx);
+        pl.elbows[m].rotation.x = k < 0 ? -0.9 : -0.2;
+      }
+      pl.body.rotation.x = k < 0 ? -0.25 : 0.25 * k;
     }
   }
   if (w3 > 0) applyPose3d(pl, i, w3, baseY);
@@ -694,11 +736,13 @@ function applyPose3d(pl, i, w, baseY) {
   // front of the body and off the grass)
   const kickLike = [H36M.rFoot, H36M.lFoot].some((ft) =>
     L[ft].z - L[H36M.pelvis].z > 0.45 && L[ft].y - Math.min(L[H36M.rFoot].y, L[H36M.lFoot].y) > 0.25);
-  const wl = w * Math.max(clamp((0.9 - speed) / 0.4, 0, 1), kickLike ? 1 : 0);
+  const wl = pl.action && !kickLike ? 0
+    : w * Math.max(clamp((0.9 - speed) / 0.4, 0, 1), kickLike ? 1 : 0);
   if (wl > 0.5) pl.stance = null;               // pose-driven legs: standing foot = lower one
+  const wa = pl.action === "header" || pl.action === "throw" ? 0 : w;  // arms busy
   sides.forEach((s, k) => {
-    const qS = aim(pl.arms[k], qC, DOWN, dir(s.sh, s.el), w);
-    aim(pl.elbows[k], qS, DOWN, dir(s.el, s.wr), w);
+    const qS = aim(pl.arms[k], qC, DOWN, dir(s.sh, s.el), wa);
+    aim(pl.elbows[k], qS, DOWN, dir(s.el, s.wr), wa);
     if (wl > 0) {
       const qH = aim(pl.legs[k], qP, DOWN, dir(s.hip, s.kn), wl);
       aim(pl.knees[k], qH, DOWN, dir(s.kn, s.ft), wl);
@@ -774,7 +818,7 @@ function plantFeet(pl, f) {
   pl.root.updateMatrixWorld(true);
   for (let k = 0; k < 2; k++) {
     const id = pl.plant[k][fi];
-    if (id >= 0) solveLegIK(pl, k, pl.plantAt[k][id]);
+    if (id >= 0 && k !== pl.actionLeg) solveLegIK(pl, k, pl.plantAt[k][id]);
   }
 }
 
@@ -901,6 +945,12 @@ function update(f) {
     marker.rotation.y = f * 0.08;
     marker.material.color.set(scene_.teams[op.p.team] ?? "#ffe14d").offsetHSL(0, 0, 0.15);
   }
+  // around a touch the ball meets the foot / head / hands that plays it
+  const tb = touchBall(f);
+  if (tb) {
+    ballMesh.position.copy(tb);
+    ballBlob.position.set(tb.x, THEME === "toy" ? 0.07 : 0.02, tb.z);
+  }
   // a keeper holding the ball: it sits in his hands (from the 3D pose when there is one)
   if (ball.hands?.[Math.round(f)] && op && op.root.visible) {
     const hp = handsPosition(op);
@@ -943,6 +993,53 @@ function update(f) {
 }
 
 if (USE_POSE && P.get("plant") !== "0") buildPlants();   // ?plant=0 → no foot locking
+buildTouches();
+
+// where each touch meets the ball, and with which leg: posed once at load
+function buildTouches() {
+  BUILDING_PLANTS = true;
+  for (const pl of players) {
+    for (const t of pl.touches) {
+      updatePlayer(pl, t.f);
+      if (!pl.root.visible) continue;
+      const bx = ball.x[t.f], by = ball.y[t.f];
+      if (bx != null) {                          // kick with the leg on the ball's side
+        const [x, z] = toWorld(bx, by), yaw = pl.root.rotation.y;
+        const dx = x - pl.root.position.x, dz = z - pl.root.position.z;
+        t.leg = dx * Math.cos(yaw) - dz * Math.sin(yaw) > 0 ? 1 : 0;  // person's left = +x
+      }
+      updatePlayer(pl, t.f);
+      pl.root.updateMatrixWorld(true);
+      const fwd = new THREE.Vector3(Math.sin(pl.root.rotation.y), 0, Math.cos(pl.root.rotation.y));
+      const r = ballMesh.geometry.parameters.radius;
+      if (t.type === "kick") t.at = soleWorld(pl, t.leg).addScaledVector(fwd, r).setY(r);
+      else if (t.type === "header") t.at = pl.head.getWorldPosition(new THREE.Vector3()).addScaledVector(fwd, 0.3);
+      else t.at = handsPosition(pl).add(new THREE.Vector3(0, 0.15, 0));
+    }
+  }
+  BUILDING_PLANTS = false;
+}
+
+window.__touches = () => players.flatMap((pl) => pl.touches.map((t) => ({
+  player: pl.p.id, role: pl.p.role, f: t.f, type: t.type, leg: t.leg,
+  at: t.at && t.at.toArray().map((v) => +v.toFixed(2)) })));
+
+// the ball leaves from the contact point: blended in over the frames around each touch
+function touchBall(f) {
+  for (const pl of players) {
+    for (const t of pl.touches) {
+      if (!t.at || f < t.f - 3 || f > t.f + 6) continue;
+      const bx = sample(ball.x, f), by = sample(ball.y, f);
+      if (bx == null) continue;
+      const r = ballMesh.geometry.parameters.radius;
+      const [x, z] = toWorld(bx, by);
+      const data = new THREE.Vector3(x, r + (sample(ball.z, f) ?? 0), z);
+      const w = f <= t.f ? (f - (t.f - 3)) / 3 : 1 - (f - t.f) / 6;   // 0 → 1 at contact → 0
+      return data.lerp(t.at, clamp(w, 0, 1));
+    }
+  }
+  return null;
+}
 
 
 // ─────────────────────────── playback / recording ───────────────────────────
