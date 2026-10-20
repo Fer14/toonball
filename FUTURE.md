@@ -20,22 +20,34 @@ Measured with the motion diagnostics after the calibration / goalkeeper / ball r
 
 ## Pose estimation for player animation
 
-**Problem:** players are animated procedurally (run cycle from speed, facing from heading).
-Legs swing too much and every player moves the same way; real body language is lost.
+### v1 (branch `pose-estimation`)
 
-**Idea:** estimate a body pose per player and per frame, and drive the avatar's skeleton with it
-instead of the procedural cycle.
+- **2D pose:** YOLO11m-pose on upscaled crops of every tracked box (`toonball/pose/estimate.py`,
+  cached as `pose.parquet`, about 1 min per 30 s clip).
+- **Angles** (`toonball/pose/angles.py`): limbs are assumed to swing in the sagittal plane, and
+  foreshortening is undone with s = facing · image-right. The weight drops when a player runs
+  at or away from the camera.
+- **Left/right legs are unreliable on 50–150 px players** (hip–hip correlation ≈ 0 while
+  running), so v1 exports only side-independent cues:
+  - gait phase, locked to the stride opening |lh − rh| with a second-order PLL (legs-apart
+    timing vs video: corr 0.35–0.53, against ≈ 0 for the procedural cycle)
+  - stride amplitude, mean knee and elbow bend, torso lean and roll
+- **Viewer:** knees and elbows added to the rig. Everything is blended with the procedural
+  cycle by reliability. The "pose from video" checkbox, or `&pose=0` in the URL, turns it off
+  for comparison.
+- **Found along the way:** the procedural cadence was about 5 steps/s at a jog. The stride
+  length is now 1.2 m + 0.4 × speed, about 3 steps/s, as measured.
 
-- **2D keypoints** on each tracked crop: RTMPose / ViTPose (COCO-17), or YOLO11-pose run on the
-  player boxes. Players are 50–150 px tall in wide shots, so upscale the crops and smooth the
-  keypoints over time per track (One-Euro filter / Savitzky–Golay).
-- **2D → 3D lifting:** MotionBERT / VideoPose3D on the per-track 2D sequence, or world-grounded
-  mesh recovery (GVHMR, 4DHumans / HMR2.0, CameraHMR) on closer shots. Use the pitch homography /
-  camera matrix to put the root on the ground plane and keep feet planted (no foot sliding).
-- **Retargeting:** map joint rotations onto the avatar rig (hips, knees, shoulders, elbows,
-  head). Fall back to the procedural cycle when keypoint confidence is low (occlusion, tiny
-  players).
-- **Cheaper middle ground:** use pose only for events (kick leg, header, goalkeeper dive,
-  throw-in arms), detected from keypoints, and keep the procedural cycle otherwise.
-- **Cost:** about 5–10 ms per crop for RTMPose-m on the 3060, so roughly 22 crops × 25 fps
-  → an offline pass, cached as `pose.parquet` next to `state.parquet`.
+### Next
+
+- **Left/right:** resolve which leg leads from the foot on the ground (the lowest ankle, which
+  stays still in pitch coordinates) instead of the model's L/R labels.
+- **Events from pose:** kicks (one leg far forward), headers (both ankles off the ground),
+  throw-ins (both hands above the head), goalkeeper dives (torso near horizontal) — instead of
+  inferring them from the ball alone.
+- **Better 3D:** lift 2D → 3D (MotionBERT / VideoPose3D) on per-track sequences, or
+  world-grounded mesh recovery (GVHMR, 4DHumans, CameraHMR) on closer shots, using the camera
+  matrix to keep feet planted.
+- **Retargeting** full joint rotations onto the rig once left/right is reliable.
+- **Faster crops:** RTMPose-m (≈5 ms per crop) if the pose pass becomes the bottleneck on long
+  videos.

@@ -32,6 +32,7 @@ def export(world: World, out: Path, video: str) -> Path:
                 "id": t.id, "role": t.role, "team": t.team, "start": t.start,
                 "x": _r(t.x), "y": _r(t.y), "s": _r(t.speed, 1), "a": _r(t.alpha),
                 **({"colour": t.colour} if t.colour else {}),
+                **({"pose": {k: _r(v) for k, v in t.pose.items()}} if t.pose else {}),
             }
             for t in world.tracks
         ],

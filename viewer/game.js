@@ -9,6 +9,7 @@ const RUN = P.get("run") || "/runs/08fd33_0";
 const THEME = P.get("theme") || "wii";
 const LAYOUT = P.get("layout") || "pip";
 const RECORD = P.has("record");
+const USE_POSE = P.get("pose") !== "0";     // ?pose=0 → procedural animation only
 document.body.classList.add(THEME, LAYOUT, ...(RECORD ? ["record"] : []));
 
 const L = 105, W = 68;                     // pitch metres
@@ -81,8 +82,9 @@ for (const p of scene_.players) {
     d = Math.atan2(Math.sin(d), Math.cos(d));
     h += d * (i === 0 ? 1 : 0.15);
     hd[i] = h;
-    // one gait cycle covers ~1.2 m walking up to ~2.7 m sprinting (1.2 Hz → 3 Hz cadence)
-    phase += (2 * Math.PI * sp) / FPS / (0.9 + 0.22 * sp);
+    // one gait cycle (two steps) covers ~1.8 m walking up to ~4.4 m sprinting, i.e. about
+    // 3 footsteps/s when jogging (same formula as toonball/pose/angles.stride_length)
+    phase += (2 * Math.PI * sp) / FPS / (1.2 + 0.4 * sp);
     ph[i] = phase;
   }
   p.heading = hd; p.phase = ph;
@@ -461,19 +463,24 @@ function makePlayer(p) {
     parent.add(m);
     return m;
   };
-  const legs = [], arms = [];
+  // two-segment limbs: hip → knee → boot, shoulder → elbow → hand
+  const legs = [], knees = [], arms = [], elbows = [];
   for (const sx of [-1, 1]) {
     const hip = new THREE.Group(); hip.position.set(0.14 * sx, 0.88, 0); body.add(hip);
-    add(hip, new THREE.CapsuleGeometry(0.1, 0.32, 4, 10), skin, 0, -0.22, 0);
-    add(hip, new THREE.CylinderGeometry(0.11, 0.1, 0.32, 10), sockM, 0, -0.55, 0);
-    add(hip, new THREE.BoxGeometry(0.16, 0.1, 0.3), bootM, 0, -0.78, 0.06);
-    legs.push(hip);
+    add(hip, new THREE.CapsuleGeometry(0.1, 0.2, 4, 10), skin, 0, -0.2, 0);
+    const knee = new THREE.Group(); knee.position.set(0, -0.4, 0); hip.add(knee);
+    add(knee, new THREE.SphereGeometry(0.1, 10, 8), skin, 0, 0, 0);
+    add(knee, new THREE.CylinderGeometry(0.105, 0.095, 0.3, 10), sockM, 0, -0.16, 0);
+    add(knee, new THREE.BoxGeometry(0.16, 0.1, 0.3), bootM, 0, -0.36, 0.06);
+    legs.push(hip); knees.push(knee);
     const sh = new THREE.Group(); sh.position.set(0.34 * sx, 1.42, 0); body.add(sh);
     add(sh, new THREE.SphereGeometry(0.12, 12, 10), shirtM, 0, 0, 0);
-    add(sh, new THREE.CapsuleGeometry(0.075, 0.32, 4, 10), skin, 0, -0.27, 0);
-    if (role === "goalkeeper") add(sh, new THREE.SphereGeometry(0.11, 12, 10), M("#f2f2f2"), 0, -0.5, 0);
+    add(sh, new THREE.CapsuleGeometry(0.075, 0.13, 4, 10), skin, 0, -0.14, 0);
+    const elbow = new THREE.Group(); elbow.position.set(0, -0.28, 0); sh.add(elbow);
+    add(elbow, new THREE.CapsuleGeometry(0.07, 0.12, 4, 10), skin, 0, -0.12, 0);
+    if (role === "goalkeeper") add(elbow, new THREE.SphereGeometry(0.11, 12, 10), M("#f2f2f2"), 0, -0.24, 0);
     sh.rotation.z = 0.12 * sx;
-    arms.push(sh);
+    arms.push(sh); elbows.push(elbow);
   }
   add(body, new THREE.CylinderGeometry(0.28, 0.26, 0.26, 16), shortsM, 0, 0.92, 0);
   add(body, new THREE.CapsuleGeometry(0.28, 0.3, 6, 16), shirtM, 0, 1.25, 0);
@@ -492,7 +499,7 @@ function makePlayer(p) {
   }
   root.scale.setScalar(SCALE);
   scene.add(root);
-  return { p, root, body, legs, arms, head, base, mats, kicks: kicksAt.get(p.id) ?? [] };
+  return { p, root, body, legs, knees, arms, elbows, head, base, mats, kicks: kicksAt.get(p.id) ?? [] };
 }
 
 const players = scene_.players.map(makePlayer);
@@ -546,16 +553,31 @@ function updatePlayer(pl, f) {
   // fade in / out when someone enters or leaves the camera view
   for (const m of pl.mats) { m.opacity = alpha; m.depthWrite = alpha > 0.99; }
 
-  const speed = sample(p.s, i) ?? 0, ph = sample(p.phase, i);
+  // pose from the video (toonball/pose): gait timing + stride size, knee / elbow bend, lean,
+  // sideways tilt — blended with the procedural cycle by how reliable the pose is
+  const pose = USE_POSE ? p.pose : null;
+  const pw = pose ? clamp(sample(pose.w, i) ?? 0, 0, 1) : 0;
+  const speed = sample(p.s, i) ?? 0;
+  const ph = pose ? sample(pose.phase, i) : sample(p.phase, i);
   const amp = clamp(speed / 8, 0, 1);
   const moving = clamp((speed - 0.3) / 0.7, 0, 1);       // blend into standing still
-  const swing = Math.sin(ph) * (0.12 + 0.45 * amp) * moving;
+  const swingAmp = lerp((0.12 + 0.45 * amp) * moving, clamp(sample(pose?.amp ?? [], i) ?? 0, 0, 0.8), pw);
+  const swing = Math.sin(ph) * swingAmp;
   const baseY = pl.base ? 0.14 : 0;
+  const kneePose = sample(pose?.knee ?? [], i), elbowPose = sample(pose?.elbow ?? [], i);
   for (const [k, sx] of [[0, -1], [1, 1]]) {
     pl.legs[k].rotation.set(-sx * swing, 0, 0);
     pl.arms[k].rotation.set(sx * swing * 0.8, 0, 0.12 * sx);
+    // knees bend most while the leg swings back; elbows stay bent more when running fast
+    const kProc = 0.08 + (0.2 + 0.9 * amp) * moving * Math.max(0, sx * Math.sin(ph));
+    pl.knees[k].rotation.set(kneePose == null ? kProc : kProc + pw * (kneePose - 0.08 - 0.3 * amp * moving), 0, 0);
+    const eProc = 0.25 + 0.9 * amp * moving;
+    pl.elbows[k].rotation.set(-(elbowPose == null ? eProc : lerp(eProc, elbowPose, pw)), 0, 0);
   }
-  pl.body.rotation.set(0.1 * amp, 0, 0);
+  const leanPose = sample(pose?.lean ?? [], i);
+  pl.body.rotation.set(leanPose == null ? 0.1 * amp : lerp(0.1 * amp, clamp(leanPose, -0.3, 0.5), pw), 0, 0);
+  const rollPose = sample(pose?.roll ?? [], i), rw = pose ? clamp(sample(pose.wr, i) ?? 0, 0, 1) : 0;
+  if (rollPose != null) pl.body.rotation.z = -clamp(rollPose, -0.3, 0.3) * rw * 0.8;
   pl.body.position.y = baseY + Math.abs(Math.cos(ph)) * 0.05 * amp;
   pl.root.position.y = THEME === "toy" ? Math.abs(Math.sin(ph)) * 0.18 * amp : 0;
   pl.head.rotation.y = Math.sin(f * 0.05 + p.id) * 0.15;
@@ -594,6 +616,7 @@ function animateKeeper(pl, f, i, speed, ph, baseY) {
     }
     pl.body.rotation.set(0.28, 0, 0);
     pl.body.position.y = baseY - 0.12;
+    for (let k = 0; k < 2; k++) { pl.knees[k].rotation.x = 0.55; pl.elbows[k].rotation.x = -0.6; }
   }
   for (const d of p.dives) {
     const k = (f - d.f) / (0.85 * FPS);
@@ -686,9 +709,14 @@ if (!RECORD) {
   video.src = `${RUN}/${scene_.video}`;
   const seek = document.getElementById("seek"), play = document.getElementById("play");
   const themeSel = document.getElementById("theme"), layoutSel = document.getElementById("layout");
-  themeSel.value = THEME; layoutSel.value = LAYOUT;
-  const go = () => { P.set("theme", themeSel.value); P.set("layout", layoutSel.value); location.search = P; };
-  themeSel.onchange = layoutSel.onchange = go;
+  const poseBox = document.getElementById("pose");
+  themeSel.value = THEME; layoutSel.value = LAYOUT; poseBox.checked = USE_POSE;
+  const go = () => {
+    P.set("theme", themeSel.value); P.set("layout", layoutSel.value);
+    P.set("pose", poseBox.checked ? "1" : "0");
+    location.search = P;
+  };
+  themeSel.onchange = layoutSel.onchange = poseBox.onchange = go;
   seek.max = N - 1;
   play.onclick = () => (video.paused ? video.play() : video.pause());
   video.onplay = () => (play.textContent = "❚❚");

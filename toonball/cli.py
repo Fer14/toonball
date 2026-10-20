@@ -6,6 +6,7 @@ import subprocess
 from pathlib import Path
 
 import numpy as np
+import polars as pl
 import typer
 
 app = typer.Typer(add_completion=False, no_args_is_help=True)
@@ -25,7 +26,7 @@ def _ffmpeg_cut(src: Path, dst: Path, start_f: int | None = None, end_f: int | N
                     "-pix_fmt", "yuv420p", str(dst)], check=True)
 
 
-def _pipeline(store, force: bool = False) -> dict:
+def _pipeline(store, force: bool = False, pose_on: bool = True) -> dict:
     """clip.mp4 in a store dir → detections → teams → calibration → world → scene.json."""
     from toonball.calib import camera, homography, motion
     from toonball.detect import run as detect
@@ -74,6 +75,15 @@ def _pipeline(store, force: bool = False) -> dict:
 
     w = world.build(store.df("people"), store.df("teams"), store.df("ball_raw"), H, P, fps,
                     size, store.json("colours"), colour_of)
+
+    if pose_on:
+        from toonball.pose import angles, estimate
+        if force or not store.has("pose.parquet"):
+            estimate.run(str(video), store.df("people"),
+                         str(WEIGHTS / "yolo11m-pose.pt")).write_parquet(store.path("pose.parquet"))
+        kps = angles.index(pl.read_parquet(store.path("pose.parquet")))
+        for t in w.tracks:
+            t.pose = angles.track_angles(t, kps, H, fps, w.ball_x, w.ball_y)
     store.put_df("state", world.to_frame(w))
     store.put_json("flights", w.flights)
     export(w, store.path("scene.json"), "clip.mp4")

@@ -36,6 +36,8 @@ flowchart LR
     K --> W
     T --> W
     W --> B[6 · ball<br/>possession ·<br/>3D flights]
+    T --> PO[6b · pose<br/>stride timing ·<br/>knees · elbows · lean]
+    PO --> J
     B --> J[(scene.json)]
     W --> J
     J --> G[7 · game<br/>Three.js renderer]
@@ -51,6 +53,7 @@ flowchart LR
 | 4 | **Teams** | Splits players into the two kits and measures each kit's colour | SigLIP image embeddings of shirt crops → UMAP → k-means, majority vote per track | `toonball/team/classifier.py` |
 | 5 | **World** | One smooth trajectory per real person; one goalkeeper per goal | tracklets stitched across occlusions, duplicates merged, Kalman + RTS smoothing with human acceleration limits | `toonball/track/players.py` |
 | 6 | **Ball** | Who has the ball, where it goes, how high it flies | possession with hysteresis; ball at the owner's feet while dribbling; airborne passes fitted as gravity parabolas through the 3D camera | `toonball/track/ball.py` |
+| 6b | **Pose** | Body posture of every player: stride timing and size, knee / elbow bend, lean, sideways tilt | YOLO11-pose on upscaled player crops; angles corrected for viewing direction; gait phase-locked to the footsteps seen in the video | `toonball/pose/` |
 | 7 | **Game** | Renders the match as a cartoon, synced with the source video | Three.js: Mii-style or toy-figure players, procedural running / kicking / goalkeeper dives, broadcast-style follow camera | `viewer/` |
 
 ### The hard parts of doing this from one camera

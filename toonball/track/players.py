@@ -33,6 +33,7 @@ class Track:
     alpha: np.ndarray  # 1 = seen, fading towards 0 around entries / exits
     colour: str | None = None
     raw_ids: list[int] = field(default_factory=list)
+    pose: dict[str, np.ndarray] | None = None   # joint angles, see toonball/pose/angles.py
 
 
 def _on_pitch(xy: np.ndarray, margin: float) -> np.ndarray:
