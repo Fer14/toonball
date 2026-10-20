@@ -567,15 +567,26 @@ function updatePlayer(pl, f) {
   const ph = pose ? sample(pose.phase, i) : sample(p.phase, i);
   const amp = clamp(speed / 8, 0, 1);
   const moving = clamp((speed - 0.3) / 0.7, 0, 1);       // blend into standing still
-  const swingAmp = lerp((0.12 + 0.45 * amp) * moving, clamp(sample(pose?.amp ?? [], i) ?? 0, 0, 0.8), pw);
+  // swing size from physics, timing from the video: during one step (half a gait cycle) the
+  // standing foot must sweep back as far as the body travels, so it doesn't slide
+  const phArr = pose ? pose.phase : p.phase;
+  const omega = Math.abs((sample(phArr, i + 1) ?? 0) - (sample(phArr, i - 1) ?? 0)) / 2 * FPS;
+  const legLen = (THIGH + SHIN) * SCALE * 0.95;
+  const stepLen = omega > 0.5 ? speed * Math.PI / omega : 0;          // metres per step
+  const swingAmp = Math.asin(clamp(stepLen / (2 * legLen), 0, 0.8)) * moving;
   const swing = Math.sin(ph) * swingAmp;
+  // standing foot of the stepping cycle: leg angle (backward +) is −sx·sin(ph), so leg k
+  // stands while −sx·cos(ph) > 0 (sweeping back): k = 0 (sx = −1) when cos(ph) > 0
+  pl.stance = moving > 0.5 ? (Math.cos(ph) > 0 ? 0 : 1) : null;
   const baseY = pl.base ? 0.14 : 0;
   const kneePose = sample(pose?.knee ?? [], i), elbowPose = sample(pose?.elbow ?? [], i);
   for (const [k, sx] of [[0, -1], [1, 1]]) {
     pl.legs[k].rotation.set(-sx * swing, 0, 0);
     pl.arms[k].rotation.set(sx * swing * 0.8, 0, 0.12 * sx);
-    // knees bend most while the leg swings back; elbows stay bent more when running fast
-    const kProc = 0.08 + (0.2 + 0.9 * amp) * moving * Math.max(0, sx * Math.sin(ph));
+    // leg angle (backward +) is −sx·sin(ph): the knee folds while the leg swings forward
+    // through the air (angle decreasing), and stays nearly straight while it stands and
+    // sweeps back; elbows stay bent more when running fast
+    const kProc = 0.08 + (0.25 + 1.1 * amp) * moving * Math.max(0, sx * Math.cos(ph));
     pl.knees[k].rotation.set(kneePose == null ? kProc : kProc + pw * (kneePose - 0.08 - 0.3 * amp * moving), 0, 0);
     const eProc = 0.25 + 0.9 * amp * moving;
     pl.elbows[k].rotation.set(-(elbowPose == null ? eProc : lerp(eProc, elbowPose, pw)), 0, 0);
@@ -584,7 +595,8 @@ function updatePlayer(pl, f) {
   pl.body.rotation.set(leanPose == null ? 0.1 * amp : lerp(0.1 * amp, clamp(leanPose, -0.3, 0.5), pw), 0, 0);
   const rollPose = sample(pose?.roll ?? [], i), rw = pose ? clamp(sample(pose.wr, i) ?? 0, 0, 1) : 0;
   if (rollPose != null) pl.body.rotation.z = -clamp(rollPose, -0.3, 0.3) * rw * 0.8;
-  pl.body.position.y = baseY + Math.abs(Math.cos(ph)) * 0.05 * amp;
+  // runners lower their hips (more leg reach for each stance): the planted foot can hold
+  pl.body.position.y = baseY + Math.abs(Math.cos(ph)) * 0.05 * amp - 0.14 * amp * moving;
   pl.root.position.y = THEME === "toy" ? Math.abs(Math.sin(ph)) * 0.18 * amp : 0;
   pl.head.rotation.y = Math.sin(f * 0.05 + p.id) * 0.15;
 
@@ -603,6 +615,7 @@ function updatePlayer(pl, f) {
     }
   }
   if (w3 > 0) applyPose3d(pl, i, w3, baseY);
+  if (pl.plant && !BUILDING_PLANTS) plantFeet(pl, f);
 }
 
 // ── 3D pose retargeting (joints from toonball/pose/lift.py, H36M order, cm, pitch x / y / z-up)
@@ -650,7 +663,13 @@ function applyPose3d(pl, i, w, baseY) {
   if (left.lengthSq() < 1e-6) return;
   const fwd = new THREE.Vector3().crossVectors(left.normalize(), UP);
   const yaw = Math.atan2(fwd.x, fwd.z), cur = pl.root.rotation.y;
-  pl.root.rotation.y = cur + Math.atan2(Math.sin(yaw - cur), Math.cos(yaw - cur)) * w;
+  // moving: hips and legs face the way the player goes (or the feet slide), the torso twists
+  // towards where the pose says he is facing; standing: the whole body turns with the pose
+  const speed = sample(pl.p.s, i) ?? 0;
+  const standing = clamp((0.9 - speed) / 0.4, 0, 1);
+  const twist = Math.atan2(Math.sin(yaw - cur), Math.cos(yaw - cur));
+  pl.root.rotation.y = cur + twist * w * standing;
+  const torsoTwist = clamp(twist * (1 - standing), -1.2, 1.2) * w;
 
   const toLocal = new THREE.Quaternion().setFromAxisAngle(UP, -pl.root.rotation.y);
   const L = J.map((v) => v.applyQuaternion(toLocal));
@@ -659,22 +678,151 @@ function applyPose3d(pl, i, w, baseY) {
   pl.body.quaternion.slerp(IDENT, w);
   pl.pelvis.quaternion.slerp(IDENT, w);
   const qP = pl.body.quaternion.clone().multiply(pl.pelvis.quaternion);
-  const qC = aim(pl.chest, qP, UP, dir(H36M.pelvis, H36M.thorax), w);
+  let qC = aim(pl.chest, qP, UP, dir(H36M.pelvis, H36M.thorax), w);
+  if (torsoTwist) {
+    pl.chest.quaternion.multiply(new THREE.Quaternion().setFromAxisAngle(UP, torsoTwist));
+    qC = qP.clone().multiply(pl.chest.quaternion);
+  }
   aim(pl.head, qC, UP, dir(H36M.thorax, H36M.head), w);
   const sides = [  // rig index 0 = person's right (−x), 1 = left (+x)
     { sh: H36M.rSh, el: H36M.rEl, wr: H36M.rWr, hip: H36M.rHip, kn: H36M.rKnee, ft: H36M.rFoot },
     { sh: H36M.lSh, el: H36M.lEl, wr: H36M.lWr, hip: H36M.lHip, kn: H36M.lKnee, ft: H36M.lFoot },
   ];
+  // legs: the lifted pose doesn't step cleanly, so whenever the player moves the stepping cycle
+  // (locked to the real footsteps) drives them and the standing foot is planted; the pose
+  // takes the legs when the player stands, and for leg actions it shows (a kick: foot well in
+  // front of the body and off the grass)
+  const kickLike = [H36M.rFoot, H36M.lFoot].some((ft) =>
+    L[ft].z - L[H36M.pelvis].z > 0.45 && L[ft].y - Math.min(L[H36M.rFoot].y, L[H36M.lFoot].y) > 0.25);
+  const wl = w * Math.max(clamp((0.9 - speed) / 0.4, 0, 1), kickLike ? 1 : 0);
+  if (wl > 0.5) pl.stance = null;               // pose-driven legs: standing foot = lower one
   sides.forEach((s, k) => {
     const qS = aim(pl.arms[k], qC, DOWN, dir(s.sh, s.el), w);
     aim(pl.elbows[k], qS, DOWN, dir(s.el, s.wr), w);
-    const qH = aim(pl.legs[k], qP, DOWN, dir(s.hip, s.kn), w);
-    aim(pl.knees[k], qH, DOWN, dir(s.kn, s.ft), w);
+    if (wl > 0) {
+      const qH = aim(pl.legs[k], qP, DOWN, dir(s.hip, s.kn), wl);
+      aim(pl.knees[k], qH, DOWN, dir(s.kn, s.ft), wl);
+    }
   });
   // keep the lower foot on the grass: crouches lower the body (avatar legs ≈ 0.94 × human)
   const footLow = Math.min(L[H36M.rFoot].y, L[H36M.lFoot].y);
-  pl.body.position.y = lerp(pl.body.position.y, baseY + Math.max(0.3, -footLow * 0.94) - 0.86, w);
+  pl.body.position.y = lerp(pl.body.position.y, baseY + Math.max(0.3, -footLow * 0.94) - 0.86, wl);
 }
+
+// ── foot planting: a foot that lands stays where it landed (no sliding) ──────────────────
+// A pre-pass poses every player in every frame and records where each sole is. A foot is
+// planted while it is on the grass and barely moving; during a plant it is locked to the spot
+// where it landed and a two-bone IK bends hip + knee to reach it.
+const SOLE = new THREE.Vector3(0, -0.41, 0);     // sole in the knee group's frame
+const THIGH = 0.4, SHIN = 0.41;                   // rig segment lengths (before SCALE)
+let BUILDING_PLANTS = false;
+
+function soleWorld(pl, k) {
+  return pl.knees[k].localToWorld(SOLE.clone());
+}
+
+function buildPlants(margin = 0.02, minRun = 3) {
+  // standing foot = the stepping cycle's stance leg while moving, else the lower sole (with a
+  // little hysteresis so it doesn't flicker); it stays planted until the other foot takes over
+  BUILDING_PLANTS = true;
+  const Y = players.map(() => [new Float32Array(N).fill(NaN), new Float32Array(N).fill(NaN)]);
+  const ST = players.map(() => new Int8Array(N).fill(-1));
+  const X = players.map(() => [new Float32Array(N * 3), new Float32Array(N * 3)]);
+  for (let f = 0; f < N; f++) {
+    players.forEach((pl, j) => {
+      updatePlayer(pl, f);
+      if (!pl.root.visible || pose3dWeight(pl.p, f - pl.p.start) < 0.5) return;
+      pl.root.updateMatrixWorld(true);
+      for (let k = 0; k < 2; k++) {
+        const v = soleWorld(pl, k);
+        v.toArray(X[j][k], 3 * f);
+        Y[j][k][f] = v.y;
+      }
+      if (pl.stance != null) ST[j][f] = pl.stance;
+    });
+  }
+  players.forEach((pl, j) => {
+    const ground = (pl.base ? 0.14 : 0) * SCALE;
+    pl.plant = [new Int32Array(N).fill(-1), new Int32Array(N).fill(-1)];
+    pl.plantAt = [[], []];
+    let cur = -1, start = 0;
+    const close = (end) => {
+      if (cur >= 0 && end - start >= minRun) {
+        const a = X[j][cur], id = pl.plantAt[cur].length;
+        pl.plantAt[cur].push(new THREE.Vector3(a[3 * start], Math.max(ground, a[3 * start + 1]),
+                                               a[3 * start + 2]));
+        pl.plant[cur].fill(id, start, end);
+      }
+    };
+    for (let f = 0; f <= N; f++) {
+      const y0 = f < N ? Y[j][0][f] : NaN, y1 = f < N ? Y[j][1][f] : NaN;
+      if (!Number.isFinite(y0) || !Number.isFinite(y1)) { close(f); cur = -1; continue; }
+      const byCycle = ST[j][f] >= 0;
+      const lower = byCycle ? ST[j][f] : (y0 < y1 ? 0 : 1);
+      if (cur < 0) { cur = lower; start = f; continue; }
+      if (lower !== cur && (byCycle || Math.abs(y0 - y1) > margin * SCALE)) {
+        close(f); cur = lower; start = f;
+      }
+    }
+  });
+  BUILDING_PLANTS = false;
+}
+
+function plantFeet(pl, f) {
+  const fi = Math.round(f);
+  if (fi < 0 || fi >= N) return;
+  pl.root.updateMatrixWorld(true);
+  for (let k = 0; k < 2; k++) {
+    const id = pl.plant[k][fi];
+    if (id >= 0) solveLegIK(pl, k, pl.plantAt[k][id]);
+  }
+}
+
+function solveLegIK(pl, k, T) {
+  const l1 = THIGH * SCALE, l2 = SHIN * SCALE;
+  const hip = pl.legs[k].getWorldPosition(new THREE.Vector3());
+  const knee = pl.knees[k].getWorldPosition(new THREE.Vector3());
+  const toT = T.clone().sub(hip);
+  let d = toT.length();
+  if (d > (l1 + l2) * 1.02) return;               // out of reach: stance over, foot lifts
+  d = clamp(d, Math.abs(l1 - l2) + 1e-3, l1 + l2 - 1e-3);
+  const dirT = toT.normalize();
+  // keep the knee bending the way the pose bends it
+  const pole = knee.sub(hip);
+  pole.sub(dirT.clone().multiplyScalar(pole.dot(dirT)));
+  if (pole.lengthSq() < 1e-8) pole.set(Math.sin(pl.root.rotation.y), 0, Math.cos(pl.root.rotation.y));
+  pole.normalize();
+  const a = (l1 * l1 - l2 * l2 + d * d) / (2 * d), h = Math.sqrt(Math.max(0, l1 * l1 - a * a));
+  const kneeT = hip.clone().addScaledVector(dirT, a).addScaledVector(pole, h);
+  const footT = hip.clone().addScaledVector(dirT, d);
+  const qPelvis = pl.pelvis.getWorldQuaternion(new THREE.Quaternion());
+  pl.legs[k].quaternion.setFromUnitVectors(
+    DOWN, kneeT.clone().sub(hip).normalize().applyQuaternion(qPelvis.invert()));
+  pl.legs[k].updateMatrixWorld(true);
+  const qThigh = pl.legs[k].getWorldQuaternion(new THREE.Quaternion());
+  pl.knees[k].quaternion.setFromUnitVectors(
+    DOWN, footT.sub(kneeT).normalize().applyQuaternion(qThigh.invert()));
+}
+
+// diagnostics: mean horizontal speed (m/s) of the standing sole of pose-driven players —
+// 0 means no sliding
+window.__footSlide = () => {
+  let sum = 0, n = 0;
+  const prev = new Map();
+  for (let f = 0; f < N; f++) {
+    for (const pl of players) {
+      updatePlayer(pl, f);
+      if (!pl.root.visible || pose3dWeight(pl.p, f - pl.p.start) < 0.5) { prev.delete(pl); continue; }
+      pl.root.updateMatrixWorld(true);
+      const s = [soleWorld(pl, 0), soleWorld(pl, 1)];
+      const k = pl.stance ?? (s[0].y < s[1].y ? 0 : 1);
+      const q = prev.get(pl);
+      if (q && q.k === k) { sum += Math.hypot(s[k].x - q.p.x, s[k].z - q.p.z) * FPS; n++; }
+      prev.set(pl, { k, p: s[k] });
+    }
+  }
+  return { meanLowerFootSpeed: sum / Math.max(n, 1), samples: n };
+};
 
 function handsPosition(pl) {                   // between both hands, in front of the chest
   pl.root.updateMatrixWorld(true);
@@ -793,6 +941,9 @@ function update(f) {
   clockEl.textContent = `${String(Math.floor(t / 60)).padStart(2, "0")}:${String(Math.floor(t % 60)).padStart(2, "0")}`;
   renderer.render(scene, camera);
 }
+
+if (USE_POSE && P.get("plant") !== "0") buildPlants();   // ?plant=0 → no foot locking
+
 
 // ─────────────────────────── playback / recording ───────────────────────────
 window.__N = N;
