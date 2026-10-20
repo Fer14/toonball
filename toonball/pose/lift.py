@@ -64,10 +64,113 @@ class TemporalModel(nn.Module):
         return x.reshape(n, -1, self.joints_out, 3)
 
 
-def load(weights: str, device: str) -> TemporalModel:
-    m = TemporalModel()
-    m.load_state_dict(torch.load(weights, map_location="cpu", weights_only=False)["model_pos"])
-    return m.to(device).eval()
+class VideoPose3D:
+    """COCO 2D → H36M 3D, 243-frame temporal convolutions (Pavllo et al., CVPR 2019)."""
+
+    def __init__(self, weights: str, device: str):
+        self.model = TemporalModel()
+        self.model.load_state_dict(
+            torch.load(weights, map_location="cpu", weights_only=False)["model_pos"])
+        self.model = self.model.to(device).eval()
+        self.device = device
+
+    @torch.no_grad()
+    def __call__(self, xy: np.ndarray, conf: np.ndarray) -> np.ndarray:
+        pad = self.model.receptive_field // 2
+        x = np.concatenate([np.repeat(xy[:1], pad, 0), xy, np.repeat(xy[-1:], pad, 0)])
+        return self.model(torch.as_tensor(x[None], dtype=torch.float32,
+                                          device=self.device))[0].cpu().numpy()
+
+
+# COCO → H36M 2D, as in the MotionAGFormer / MHFormer demos (lib/preprocess.py)
+_H36M_FROM_COCO = [9, 11, 14, 12, 15, 13, 16, 4, 1, 5, 2, 6, 3]
+_COCO_FOR_H36M = [0, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]
+_H36M_FLIP_L, _H36M_FLIP_R = [1, 2, 3, 14, 15, 16], [4, 5, 6, 11, 12, 13]
+
+
+def coco_to_h36m(xy: np.ndarray, conf: np.ndarray) -> np.ndarray:
+    """(T, 17, 2) COCO + (T, 17) scores → (T, 17, 3) H36M (x, y, score)."""
+    T = len(xy)
+    h = np.zeros((T, 17, 2), np.float32)
+    head = np.stack([xy[:, 1:5, 0].mean(1), xy[:, 1:3, 1].sum(1) - xy[:, 0, 1]], 1)
+    thorax = xy[:, 5:7].mean(1)
+    thorax = thorax + (xy[:, 0] - thorax) / 3
+    pelvis = xy[:, 11:13].mean(1)
+    spine = xy[:, [5, 6, 11, 12]].mean(1)
+    h[:, [10, 8, 0, 7]] = np.stack([head, thorax, pelvis, spine], 1)
+    h[:, _H36M_FROM_COCO] = xy[:, _COCO_FOR_H36M]
+    h[:, 9] -= (h[:, 9] - xy[:, 5:7].mean(1)) / 4
+    h[:, 7, 0] += 2 * (h[:, 7, 0] - h[:, [0, 8], 0].mean(1))
+    h[:, 8, 1] -= (xy[:, 1:3, 1].mean(1) - xy[:, 0, 1]) * 2 / 3
+    sc = np.zeros((T, 17), np.float32)
+    sc[:, _H36M_FROM_COCO] = conf[:, _COCO_FOR_H36M]
+    sc[:, 0] = conf[:, [11, 12]].mean(1)
+    sc[:, 8] = conf[:, [5, 6]].mean(1)
+    sc[:, 7] = sc[:, [0, 8]].mean(1)
+    sc[:, 10] = conf[:, 1:5].mean(1)
+    return np.concatenate([h, sc[..., None]], -1)
+
+
+class MotionAGFormerLifter:
+    """H36M 2D (+ confidence) → H36M 3D, attention + graph transformer over 243 frames
+    (Mehraban et al., WACV 2024; ~38.4 mm MPJPE on Human3.6M vs ~51.8 mm for VideoPose3D with
+    detected 2D)."""
+
+    N = 243
+
+    def __init__(self, weights: str, device: str):
+        from toonball.pose.magf import MotionAGFormer
+
+        self.model = MotionAGFormer(
+            n_layers=16, dim_in=3, dim_feat=128, dim_rep=512, dim_out=3, mlp_ratio=4,
+            act_layer=nn.GELU, attn_drop=0.0, drop=0.0, drop_path=0.0, use_layer_scale=True,
+            layer_scale_init_value=1e-5, use_adaptive_fusion=True, num_heads=8, qkv_bias=False,
+            qkv_scale=None, hierarchical=False, num_joints=17, use_temporal_similarity=True,
+            temporal_connection_len=1, use_tcn=False, graph_only=False, neighbour_num=2,
+            n_frames=self.N)
+        sd = torch.load(weights, map_location="cpu", weights_only=False)["model"]
+        self.model.load_state_dict({k.removeprefix("module."): v for k, v in sd.items()})
+        self.model = self.model.to(device).eval()
+        self.device = device
+
+    def _run(self, x: np.ndarray) -> np.ndarray:  # (B, 243, 17, 3) → (B, 243, 17, 3)
+        t = torch.as_tensor(x, dtype=torch.float32, device=self.device)
+        flip = t.clone()
+        flip[..., 0] *= -1
+        flip[..., _H36M_FLIP_L + _H36M_FLIP_R, :] = flip[..., _H36M_FLIP_R + _H36M_FLIP_L, :]
+        out, out_f = self.model(t), self.model(flip)
+        out_f[..., 0] *= -1
+        out_f[..., _H36M_FLIP_L + _H36M_FLIP_R, :] = out_f[..., _H36M_FLIP_R + _H36M_FLIP_L, :]
+        return ((out + out_f) / 2).cpu().numpy()
+
+    @torch.no_grad()
+    def __call__(self, xy: np.ndarray, conf: np.ndarray) -> np.ndarray:
+        x = coco_to_h36m(xy, conf)
+        T, n = len(x), self.N
+        if T <= n:  # pad by repeating the edges, keep the real frames in the middle
+            a = (n - T) // 2
+            xp = np.concatenate([np.repeat(x[:1], a, 0), x, np.repeat(x[-1:], n - T - a, 0)])
+            return self._run(xp[None])[0, a:a + T]
+        # sliding windows, overlap-averaged with a triangular weight
+        starts = list(range(0, T - n, n // 2)) + [T - n]
+        acc = np.zeros((T, 17, 3))
+        wsum = np.zeros(T)
+        tri = np.minimum(np.arange(1, n + 1), np.arange(n, 0, -1)).astype(float)
+        out = self._run(np.stack([x[s:s + n] for s in starts]))
+        for s, o in zip(starts, out, strict=True):
+            acc[s:s + n] += o * tri[:, None, None]
+            wsum[s:s + n] += tri
+        return acc / wsum[:, None, None]
+
+
+LIFTERS = {"videopose3d": (VideoPose3D, "videopose3d_h36m_detectron_coco.bin"),
+           "motionagformer": (MotionAGFormerLifter, "motionagformer-b-h36m.pth.tr")}
+
+
+def load(kind: str, weights_dir, device: str):
+    cls, fname = LIFTERS[kind]
+    return cls(str(weights_dir / fname) if hasattr(weights_dir, "__truediv__")
+               else f"{weights_dir}/{fname}", device)
 
 
 def _fix_lr_swaps(K: np.ndarray) -> np.ndarray:
@@ -139,9 +242,7 @@ def _fill(K: np.ndarray, max_gap: int) -> np.ndarray:
     return K
 
 
-@torch.no_grad()
-def lift_track(model: TemporalModel, track, kps: dict, R_cam: np.ndarray, fps: float,
-               device: str) -> dict | None:
+def lift_track(lifter, track, kps: dict, R_cam: np.ndarray, fps: float) -> dict | None:
     """3D joints (n, 17, 3) in pitch axes (x, y, z-up), pelvis-relative metres, + confidence."""
     n = len(track.x)
     K = np.full((n, 17, 3), np.nan)
@@ -161,13 +262,14 @@ def lift_track(model: TemporalModel, track, kps: dict, R_cam: np.ndarray, fps: f
         return None
     J = np.full((n, 17, 3), np.nan)
     conf = np.zeros(n)
-    pad = model.receptive_field // 2
     for a, b in segs:
-        x = _normalise(K[a:b], fps)
-        x = np.nan_to_num(x)
-        x = np.concatenate([np.repeat(x[:1], pad, 0), x, np.repeat(x[-1:], pad, 0)])
-        out = model(torch.as_tensor(x[None], dtype=torch.float32, device=device))[0].cpu().numpy()
+        out = lifter(np.nan_to_num(_normalise(K[a:b], fps)), np.nan_to_num(K[a:b, :, 2]))
         cam = out - out[:, :1]                                  # pelvis-relative, camera axes
+        # metres: models differ in output units — scale so the median leg (hip → knee → foot)
+        # is 0.9 m
+        leg = (np.linalg.norm(cam[:, 1] - cam[:, 2], axis=1)
+               + np.linalg.norm(cam[:, 2] - cam[:, 3], axis=1))
+        cam = cam * (0.9 / max(float(np.median(leg)), 1e-6))
         frames = track.start + np.arange(a, b)
         Rw = R_cam[frames]                                      # world → camera, per frame
         world = np.einsum("tji,tkj->tki", Rw, cam)              # Rᵀ · X  (camera → world)
@@ -202,7 +304,9 @@ def camera_rotations(P: np.ndarray, size: tuple[int, int]) -> np.ndarray:
         if not np.isfinite(P[t, 0, 0]):
             continue
         M = P[t, :, :3]
-        f = np.linalg.norm(M[0] - (w / 2) * M[2]) / np.linalg.norm(M[2])
+        f = np.linalg.norm(M[0] - (w / 2) * M[2]) / max(np.linalg.norm(M[2]), 1e-12)
+        if not np.isfinite(f) or f < 1.0:   # degenerate camera on this frame
+            continue
         Rm = np.linalg.inv(np.array([[f, 0, w / 2], [0, f, h / 2], [0, 0, 1.0]])) @ M
         Rm /= np.linalg.norm(Rm[2])
         if Rm[2, 2] > 0:      # the camera's forward axis must point down towards the grass
