@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -13,6 +14,7 @@ app = typer.Typer(add_completion=False, no_args_is_help=True)
 ROOT = Path(__file__).resolve().parents[1]
 WEIGHTS = ROOT / "weights"
 MAX_W = 1920  # shots are re-encoded to at most this width
+LIFTER = os.environ.get("TOONBALL_LIFTER", "motionagformer")  # or "videopose3d"
 
 
 def _ffmpeg_cut(src: Path, dst: Path, start_f: int | None = None, end_f: int | None = None,
@@ -92,10 +94,10 @@ def _pipeline(store, force: bool = False, pose_on: bool = True) -> dict:
 
             from toonball.pose import lift
             device = "cuda" if torch.cuda.is_available() else "cpu"
-            model = lift.load(str(WEIGHTS / "videopose3d_h36m_detectron_coco.bin"), device)
+            lifter = lift.load(LIFTER, WEIGHTS, device)
             R_cam = lift.camera_rotations(cams.P, size)
             for t in w.tracks:
-                t.pose3d = lift.lift_track(model, t, kps, R_cam, fps, device)
+                t.pose3d = lift.lift_track(lifter, t, kps, R_cam, fps)
     store.put_df("state", world.to_frame(w))
     store.put_json("flights", w.flights)
     export(w, store.path("scene.json"), "clip.mp4")
