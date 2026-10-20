@@ -36,7 +36,7 @@ flowchart LR
     K --> W
     T --> W
     W --> B[6 · ball<br/>possession ·<br/>3D flights]
-    T --> PO[6b · pose<br/>stride timing ·<br/>knees · elbows · lean]
+    T --> PO[6b · pose<br/>2D keypoints →<br/>3D skeleton]
     PO --> J
     B --> J[(scene.json)]
     W --> J
@@ -53,7 +53,7 @@ flowchart LR
 | 4 | **Teams** | Splits players into the two kits and measures each kit's colour | SigLIP image embeddings of shirt crops → UMAP → k-means, majority vote per track | `toonball/team/classifier.py` |
 | 5 | **World** | One smooth trajectory per real person; one goalkeeper per goal | tracklets stitched across occlusions, duplicates merged, Kalman + RTS smoothing with human acceleration limits | `toonball/track/players.py` |
 | 6 | **Ball** | Who has the ball, where it goes, how high it flies | possession with hysteresis; ball at the owner's feet while dribbling; airborne passes fitted as gravity parabolas through the 3D camera | `toonball/track/ball.py` |
-| 6b | **Pose** | Body posture of every player: stride timing and size, knee / elbow bend, lean, sideways tilt | YOLO11-pose on upscaled player crops; angles corrected for viewing direction; gait phase-locked to the footsteps seen in the video | `toonball/pose/` |
+| 6b | **Pose** | Full-body 3D pose of every player: torso, head, arms with elbows, legs with knees | YOLO11-pose on upscaled player crops → VideoPose3D lifts each player's 2D sequence to 3D joints → rotated into pitch axes with the broadcast camera → retargeted onto the avatar's skeleton | `toonball/pose/` |
 | 7 | **Game** | Renders the match as a cartoon, synced with the source video | Three.js: Mii-style or toy-figure players, procedural running / kicking / goalkeeper dives, broadcast-style follow camera | `viewer/` |
 
 ### The hard parts of doing this from one camera
@@ -64,6 +64,7 @@ flowchart LR
 | A homography only knows the ground — a lofted ball looks like it is far away, not high | A rolling ball draws a **straight line** in the image, a flying ball draws a **curve**. Curved pieces that fit a gravity parabola through the 3D camera become flights (e.g. a 9 m high ball in clip 2e57b9_0) |
 | The detector flips players between "player" and "goalkeeper" | Roles are decided per person, not per frame: ≥30 % keeper labels, stays near a goal, at most one per goal |
 | The ball disappears behind legs | While someone has the ball it stays at their feet; gaps up to 2 s are bridged |
+| A ball held by the keeper projects metres behind him on the grass | Possession is also decided in the image (ball inside a player's box); a keeper holding it high carries it in his hands |
 | IDs break when players cross or leave the frame | Tracklets are stitched when the player could have run there; double tracks of one person are merged |
 | Box bottoms wobble by a few pixels (= metres far from the camera) | Constant-velocity Kalman smoother whose noise grows with distance from the camera |
 | The camera only sees about a third of the pitch | Players fade out at the edge of view; the game camera follows the real camera |

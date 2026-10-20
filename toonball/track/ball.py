@@ -34,8 +34,9 @@ class Ball:
     y: np.ndarray
     z: np.ndarray
     owner: np.ndarray                  # track id holding the ball, -1 none
-    kicks: list[tuple[int, int]]       # (frame, track id)
+    kicks: list[tuple[int, int]]       # (release frame, track id)
     flights: list[dict]                # accepted 3D flights (for inspection)
+    hands: np.ndarray                  # (F,) bool: held in a keeper's hands
 
 
 def _detections(ball: pl.DataFrame, H: np.ndarray, fps: float):
@@ -66,12 +67,42 @@ def _positions(tracks: list[Track], F: int) -> np.ndarray:
     return pos
 
 
-def _possession(pos: np.ndarray, gx: np.ndarray, gy: np.ndarray, radius: float = 1.5,
+def _image_near(frames: np.ndarray, uv: np.ndarray, people: pl.DataFrame,
+                raw_to_k: dict[int, int], roles: list[str], F: int):
+    """Who the ball belongs to from the image: a ball inside / touching a person's box is
+    theirs whatever its height (a ball held at the chest projects metres behind the keeper on
+    the grass). Returns near (F,) track index / -1 none / -3 no detection, and hands (F,):
+    a keeper holding it in the upper part of his body."""
+    near = np.full(F, -3)
+    hands = np.zeros(F, bool)
+    boxes = {f: g.select("track_id", "x1", "y1", "x2", "y2").to_numpy()
+             for (f,), g in people.filter(pl.col("frame").is_in(frames.tolist()))
+             .group_by("frame")}
+    for f, (u, v) in zip(frames, uv, strict=True):
+        near[f] = -1
+        best = np.inf
+        for tid, x1, y1, x2, y2 in boxes.get(f, ()):
+            k = raw_to_k.get(int(tid))
+            if k is None or roles[k] == "referee":
+                continue
+            w, h = x2 - x1, y2 - y1
+            if x1 - 0.25 * w <= u <= x2 + 0.25 * w and y1 - 0.1 * h <= v <= y2 + 0.15 * h:
+                d = abs(u - (x1 + x2) / 2) + abs(v - y2)
+                if d < best:
+                    best, near[f] = d, k
+                    hands[f] = roles[k] == "goalkeeper" and v < y1 + 0.65 * h
+    return near, hands
+
+
+def _possession(pos: np.ndarray, gx: np.ndarray, gy: np.ndarray,
+                near_img: np.ndarray | None = None, radius: float = 1.5,
                 switch: int = 4) -> np.ndarray:
     F = len(gx)
     d = np.hypot(pos[..., 0] - gx, pos[..., 1] - gy)
     d = np.where(np.isnan(d), np.inf, d)
     near = np.where(d.min(0) < radius, d.argmin(0), -1) if len(pos) else np.full(F, -1)
+    if near_img is not None:  # where the ball is detected, the image decides
+        near = np.where(near_img >= -1, np.where(near_img >= 0, near_img, near), near)
     near = np.where(np.isfinite(gx), near, -2)  # -2: ball unknown → keep current owner
     owner = np.full(F, -1)
     cur, cand, run = -1, -1, 0
@@ -85,6 +116,22 @@ def _possession(pos: np.ndarray, gx: np.ndarray, gy: np.ndarray, radius: float =
         if cand != cur and run >= (switch if cand != -1 else 2 * switch):
             cur = cand
         owner[f] = cur
+    # hysteresis delays every change by a few frames: date each possession back to the first /
+    # last frame the ball was really with that player, so a pass leaves the foot on time
+    f = 0
+    while f < F:
+        k = owner[f]
+        if k < 0:
+            f += 1
+            continue
+        a = f
+        while f < F and owner[f] == k:
+            f += 1
+        b = f - 1
+        seen = np.flatnonzero(near[max(0, a - 3 * switch): b + 1] == k) + max(0, a - 3 * switch)
+        if len(seen):
+            owner[seen[0]:a] = np.where(owner[seen[0]:a] == -1, k, owner[seen[0]:a])
+            owner[seen[-1] + 1: b + 1] = -1
     return owner
 
 
@@ -171,7 +218,8 @@ def _kinks(frames: np.ndarray, uv: np.ndarray, k: int = 4, angle: float = 30.0,
 
 
 def build_ball(ball_raw: pl.DataFrame, H: np.ndarray, P: np.ndarray | None,
-               tracks: list[Track], fps: float, max_gap_s: float = 2.0) -> Ball:
+               tracks: list[Track], fps: float, people: pl.DataFrame | None = None,
+               max_gap_s: float = 2.0) -> Ball:
     F = len(H)
     frames, uv, xy = _detections(ball_raw, H, fps)
     gx, gy = np.full(F, np.nan), np.full(F, np.nan)
@@ -190,17 +238,34 @@ def build_ball(ball_raw: pl.DataFrame, H: np.ndarray, P: np.ndarray | None,
         ix, iy = gx.copy(), gy.copy()
 
     pos = _positions(tracks, F)
-    owner_k = _possession(pos, ix, iy)
+    near_img, hands = None, np.zeros(F, bool)
+    if people is not None and len(frames):
+        raw_to_k = {r: k for k, t in enumerate(tracks) for r in t.raw_ids}
+        near_img, hands = _image_near(frames, uv, people, raw_to_k, [t.role for t in tracks], F)
+    owner_k = _possession(pos, ix, iy, near_img)
     ids = np.array([t.id for t in tracks])
     owner = np.where(owner_k >= 0, ids[np.maximum(owner_k, 0)] if len(ids) else -1, -1)
+    # a keeper keeps it in his hands until he releases it (detections drop while it's held):
+    # the hold lasts while the same keeper owns it and no detection shows it at his feet
+    hold = np.zeros(F, bool)
+    for f in range(F):
+        if owner_k[f] < 0:
+            continue
+        at_feet = near_img is not None and near_img[f] == owner_k[f] and not hands[f]
+        continuing = f > 0 and hold[f - 1] and owner_k[f] == owner_k[f - 1]
+        hold[f] = hands[f] or (continuing and not at_feet)
 
     bx, by, bz = ix.copy(), iy.copy(), np.zeros(F)
 
-    # with the ball: at the owner's feet, on the side the detections put it (≤ 0.8 m)
+    # with the ball: at the owner's feet, on the side the detections put it (≤ 0.8 m);
+    # in a keeper's hands: at his body, chest height (the viewer moves it to the hands)
     off = np.zeros(2)
     for f in range(F):
         k = owner_k[f]
         if k < 0 or not np.isfinite(pos[k, f, 0]):
+            continue
+        if hold[f]:
+            bx[f], by[f], bz[f] = pos[k, f, 0], pos[k, f, 1], 1.0
             continue
         if np.isfinite(gx[f]):
             d = np.array([gx[f], gy[f]]) - pos[k, f]
@@ -271,5 +336,5 @@ def build_ball(ball_raw: pl.DataFrame, H: np.ndarray, P: np.ndarray | None,
     for f in range(1, F):
         if (owner[f - 1] != -1 and owner[f] != owner[f - 1]
                 and np.nanmax(bs[f:f + int(0.3 * fps)], initial=0) > 6.0):
-            kicks.append((max(0, f - 2), int(owner[f - 1])))
-    return Ball(bx, by, bz, owner, kicks, flights)
+            kicks.append((f - 1, int(owner[f - 1])))  # release frame: the ball leaves the foot
+    return Ball(bx, by, bz, owner, kicks, flights, hold)

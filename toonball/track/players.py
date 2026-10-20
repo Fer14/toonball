@@ -34,6 +34,7 @@ class Track:
     colour: str | None = None
     raw_ids: list[int] = field(default_factory=list)
     pose: dict[str, np.ndarray] | None = None   # joint angles, see toonball/pose/angles.py
+    pose3d: dict[str, np.ndarray] | None = None  # 3D joints, see toonball/pose/lift.py
 
 
 def _on_pitch(xy: np.ndarray, margin: float) -> np.ndarray:

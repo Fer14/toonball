@@ -10,6 +10,7 @@ const THEME = P.get("theme") || "wii";
 const LAYOUT = P.get("layout") || "pip";
 const RECORD = P.has("record");
 const USE_POSE = P.get("pose") !== "0";     // ?pose=0 → procedural animation only
+const FOCUS = P.has("focus") ? Number(P.get("focus")) : null;
 document.body.classList.add(THEME, LAYOUT, ...(RECORD ? ["record"] : []));
 
 const L = 105, W = 68;                     // pitch metres
@@ -463,34 +464,37 @@ function makePlayer(p) {
     parent.add(m);
     return m;
   };
-  // two-segment limbs: hip → knee → boot, shoulder → elbow → hand
+  // skeleton: body → pelvis → (hips → knees) and chest → (shoulders → elbows, head);
+  // two-segment limbs so a 3D pose can drive every bone
+  const pelvis = new THREE.Group(); pelvis.position.set(0, 0.9, 0); body.add(pelvis);
+  const chest = new THREE.Group(); chest.position.set(0, 0.02, 0); pelvis.add(chest);
   const legs = [], knees = [], arms = [], elbows = [];
   for (const sx of [-1, 1]) {
-    const hip = new THREE.Group(); hip.position.set(0.14 * sx, 0.88, 0); body.add(hip);
+    const hip = new THREE.Group(); hip.position.set(0.14 * sx, -0.02, 0); pelvis.add(hip);
     add(hip, new THREE.CapsuleGeometry(0.1, 0.2, 4, 10), skin, 0, -0.2, 0);
     const knee = new THREE.Group(); knee.position.set(0, -0.4, 0); hip.add(knee);
     add(knee, new THREE.SphereGeometry(0.1, 10, 8), skin, 0, 0, 0);
     add(knee, new THREE.CylinderGeometry(0.105, 0.095, 0.3, 10), sockM, 0, -0.16, 0);
     add(knee, new THREE.BoxGeometry(0.16, 0.1, 0.3), bootM, 0, -0.36, 0.06);
     legs.push(hip); knees.push(knee);
-    const sh = new THREE.Group(); sh.position.set(0.34 * sx, 1.42, 0); body.add(sh);
+    const sh = new THREE.Group(); sh.position.set(0.34 * sx, 0.5, 0); chest.add(sh);
     add(sh, new THREE.SphereGeometry(0.12, 12, 10), shirtM, 0, 0, 0);
     add(sh, new THREE.CapsuleGeometry(0.075, 0.13, 4, 10), skin, 0, -0.14, 0);
     const elbow = new THREE.Group(); elbow.position.set(0, -0.28, 0); sh.add(elbow);
     add(elbow, new THREE.CapsuleGeometry(0.07, 0.12, 4, 10), skin, 0, -0.12, 0);
-    if (role === "goalkeeper") add(elbow, new THREE.SphereGeometry(0.11, 12, 10), M("#f2f2f2"), 0, -0.24, 0);
+    if (role === "goalkeeper") add(elbow, new THREE.SphereGeometry(0.11, 12, 10), M("#8fe03a"), 0, -0.24, 0);
     sh.rotation.z = 0.12 * sx;
     arms.push(sh); elbows.push(elbow);
   }
-  add(body, new THREE.CylinderGeometry(0.28, 0.26, 0.26, 16), shortsM, 0, 0.92, 0);
-  add(body, new THREE.CapsuleGeometry(0.28, 0.3, 6, 16), shirtM, 0, 1.25, 0);
-  const head = new THREE.Group(); head.position.set(0, 1.92, 0); body.add(head);
+  add(pelvis, new THREE.CylinderGeometry(0.28, 0.26, 0.26, 16), shortsM, 0, 0.02, 0);
+  add(chest, new THREE.CapsuleGeometry(0.28, 0.3, 6, 16), shirtM, 0, 0.33, 0);
+  const head = new THREE.Group(); head.position.set(0, 1.0, 0); chest.add(head);
   add(head, new THREE.SphereGeometry(0.33, 24, 18), skin, 0, 0, 0);
   add(head, new THREE.SphereGeometry(0.345, 24, 12, 0, Math.PI * 2, 0, Math.PI * 0.45),
       hairM, 0, 0.02, -0.03);
   for (const sx of [-1, 1]) add(head, new THREE.SphereGeometry(0.045, 10, 8), eyeM, 0.11 * sx, 0.04, 0.3);
   if (role === "referee") {
-    add(body, new THREE.BoxGeometry(0.58, 0.08, 0.5), M("#ffd400"), 0, 1.45, 0);
+    add(chest, new THREE.BoxGeometry(0.58, 0.08, 0.5), M("#ffd400"), 0, 0.53, 0);
   }
   let base = null;
   if (toy) {                                  // table-football style base
@@ -499,7 +503,8 @@ function makePlayer(p) {
   }
   root.scale.setScalar(SCALE);
   scene.add(root);
-  return { p, root, body, legs, knees, arms, elbows, head, base, mats, kicks: kicksAt.get(p.id) ?? [] };
+  return { p, root, body, pelvis, chest, legs, knees, arms, elbows, head, base, mats,
+           kicks: kicksAt.get(p.id) ?? [] };
 }
 
 const players = scene_.players.map(makePlayer);
@@ -582,10 +587,12 @@ function updatePlayer(pl, f) {
   pl.root.position.y = THEME === "toy" ? Math.abs(Math.sin(ph)) * 0.18 * amp : 0;
   pl.head.rotation.y = Math.sin(f * 0.05 + p.id) * 0.15;
 
-  if (p.role === "goalkeeper") animateKeeper(pl, f, i, speed, ph, baseY);
+  // full-body 3D pose from the video replaces the scripted moves where it is reliable
+  const w3 = pose3dWeight(p, i);
+  if (p.role === "goalkeeper" && w3 < 0.5) animateKeeper(pl, f, i, speed, ph, baseY);
 
-  for (const kf of pl.kicks) {                // kick: right leg winds back then strikes
-    const k = (f - kf) / (0.35 * FPS);
+  for (const kf of w3 < 0.5 ? pl.kicks : []) {  // scripted kick: foot strikes at the release
+    const k = (f - kf) / (0.35 * FPS) + 0.3;
     if (k >= -0.4 && k <= 1) {
       const a = k < 0 ? -1.1 * (k + 0.4) / 0.4 : lerp(-1.1, 1.3, Math.sin(k * Math.PI / 2));
       pl.legs[1].rotation.x = -a;
@@ -594,6 +601,87 @@ function updatePlayer(pl, f) {
       pl.body.rotation.x = -0.15;
     }
   }
+  if (w3 > 0) applyPose3d(pl, i, w3, baseY);
+}
+
+// ── 3D pose retargeting (joints from toonball/pose/lift.py, H36M order, cm, pitch x / y / z-up)
+const UP = new THREE.Vector3(0, 1, 0), DOWN = new THREE.Vector3(0, -1, 0);
+const IDENT = new THREE.Quaternion();
+const H36M = { pelvis: 0, rHip: 1, rKnee: 2, rFoot: 3, lHip: 4, lKnee: 5, lFoot: 6, thorax: 8,
+               head: 10, lSh: 11, lEl: 12, lWr: 13, rSh: 14, rEl: 15, rWr: 16 };
+
+function pose3dWeight(p, i) {
+  if (!USE_POSE || !p.pose3d) return 0;
+  const j = p.pose3d.j, k = Math.round(i);
+  if (k < 0 || k >= j.length || !j[k]) return 0;
+  return clamp(((p.pose3d.c[k] ?? 0) - 0.45) / 0.25, 0, 1);
+}
+
+function jointsAt(p, i) {                     // interpolated joints in three.js axes, metres
+  const J = p.pose3d.j, a0 = Math.floor(i), t = i - a0;
+  let A = J[clamp(a0, 0, J.length - 1)], B = J[clamp(a0 + 1, 0, J.length - 1)];
+  if (!A) A = B;
+  if (!B) B = A;
+  if (!A) return null;
+  const out = [];
+  for (let k = 0; k < 17; k++) {
+    const v = (c) => lerp(A[3 * k + c], B[3 * k + c], t) / 100;
+    out.push(new THREE.Vector3(v(0), v(2), v(1)));  // pitch (x, y, z-up) → three (x, up, z)
+  }
+  return out;
+}
+
+// rotate `bone` (rest direction `rest` in its parent's frame) so it points along `target`
+// (root-local frame); returns the bone's orientation in the root-local frame
+function aim(bone, parentQ, rest, target, w) {
+  const local = target.clone().applyQuaternion(parentQ.clone().invert());
+  bone.quaternion.slerp(new THREE.Quaternion().setFromUnitVectors(rest, local.normalize()), w);
+  return parentQ.clone().multiply(bone.quaternion);
+}
+
+function applyPose3d(pl, i, w, baseY) {
+  const J = jointsAt(pl.p, i);
+  if (!J) return;
+  // facing from the body itself: hips and shoulders give the person's left
+  const left = J[H36M.lHip].clone().sub(J[H36M.rHip])
+    .add(J[H36M.lSh].clone().sub(J[H36M.rSh]).multiplyScalar(0.5));
+  left.y = 0;
+  if (left.lengthSq() < 1e-6) return;
+  const fwd = new THREE.Vector3().crossVectors(left.normalize(), UP);
+  const yaw = Math.atan2(fwd.x, fwd.z), cur = pl.root.rotation.y;
+  pl.root.rotation.y = cur + Math.atan2(Math.sin(yaw - cur), Math.cos(yaw - cur)) * w;
+
+  const toLocal = new THREE.Quaternion().setFromAxisAngle(UP, -pl.root.rotation.y);
+  const L = J.map((v) => v.applyQuaternion(toLocal));
+  const dir = (a, b) => L[b].clone().sub(L[a]);
+
+  pl.body.quaternion.slerp(IDENT, w);
+  pl.pelvis.quaternion.slerp(IDENT, w);
+  const qP = pl.body.quaternion.clone().multiply(pl.pelvis.quaternion);
+  const qC = aim(pl.chest, qP, UP, dir(H36M.pelvis, H36M.thorax), w);
+  aim(pl.head, qC, UP, dir(H36M.thorax, H36M.head), w);
+  const sides = [  // rig index 0 = person's right (−x), 1 = left (+x)
+    { sh: H36M.rSh, el: H36M.rEl, wr: H36M.rWr, hip: H36M.rHip, kn: H36M.rKnee, ft: H36M.rFoot },
+    { sh: H36M.lSh, el: H36M.lEl, wr: H36M.lWr, hip: H36M.lHip, kn: H36M.lKnee, ft: H36M.lFoot },
+  ];
+  sides.forEach((s, k) => {
+    const qS = aim(pl.arms[k], qC, DOWN, dir(s.sh, s.el), w);
+    aim(pl.elbows[k], qS, DOWN, dir(s.el, s.wr), w);
+    const qH = aim(pl.legs[k], qP, DOWN, dir(s.hip, s.kn), w);
+    aim(pl.knees[k], qH, DOWN, dir(s.kn, s.ft), w);
+  });
+  // keep the lower foot on the grass: crouches lower the body (avatar legs ≈ 0.94 × human)
+  const footLow = Math.min(L[H36M.rFoot].y, L[H36M.lFoot].y);
+  pl.body.position.y = lerp(pl.body.position.y, baseY + Math.max(0.3, -footLow * 0.94) - 0.86, w);
+}
+
+function handsPosition(pl) {                   // between both hands, in front of the chest
+  pl.root.updateMatrixWorld(true);
+  const a = pl.elbows[0].localToWorld(new THREE.Vector3(0, -0.26, 0));
+  const b = pl.elbows[1].localToWorld(new THREE.Vector3(0, -0.26, 0));
+  const mid = pl.chest.worldToLocal(a.add(b).multiplyScalar(0.5));
+  mid.z = Math.max(mid.z, 0.4);                  // arms at the sides: don't bury it in the body
+  return pl.chest.localToWorld(mid);
 }
 
 // goalkeeper: ready stance facing the ball, side-steps, and dives at fast shots
@@ -664,6 +752,17 @@ function update(f) {
     marker.rotation.y = f * 0.08;
     marker.material.color.set(scene_.teams[op.p.team] ?? "#ffe14d").offsetHSL(0, 0, 0.15);
   }
+  // a keeper holding the ball: it sits in his hands (from the 3D pose when there is one)
+  if (ball.hands?.[Math.round(f)] && op && op.root.visible) {
+    const hp = handsPosition(op);
+    if (pose3dWeight(op.p, f - op.p.start) < 0.3) {   // no pose: hug it at the chest
+      op.root.updateMatrixWorld(true);
+      hp.copy(op.chest.localToWorld(new THREE.Vector3(0, 0.35, 0.38)));
+    }
+    ballMesh.position.copy(hp);
+    ballMesh.visible = true;
+    ballBlob.position.set(hp.x, THEME === "toy" ? 0.07 : 0.02, hp.z);
+  }
 
   // broadcast-style camera following the real camera's view on the pitch
   const i = Math.round(f);
@@ -678,6 +777,12 @@ function update(f) {
   const zMax = W / 2 + 3 - nearReach;
   camTarget.set(clamp(cx, -L / 2 + 5, L / 2 - 5), 0, clamp(cz, Math.min(-W / 2 + 10, zMax), zMax));
   camPos.set(lerp(camTarget.x, 0, 0.25), dist * Math.sin(elev), camTarget.z + dist * Math.cos(elev));
+  // ?focus=<player id>: close-up camera on one player (to inspect the pose)
+  const fp = FOCUS == null ? null : players.find((q) => q.p.id === FOCUS);
+  if (fp && fp.root.visible) {
+    camTarget.copy(fp.root.position).setY(1.1);
+    camPos.copy(camTarget).add(new THREE.Vector3(0, 2.5, 9));
+  }
   camera.position.copy(camPos);
   camera.lookAt(camTarget);
   sun.position.set(camTarget.x - 30, 60, camTarget.z + 20);

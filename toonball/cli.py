@@ -84,6 +84,18 @@ def _pipeline(store, force: bool = False, pose_on: bool = True) -> dict:
         kps = angles.index(pl.read_parquet(store.path("pose.parquet")))
         for t in w.tracks:
             t.pose = angles.track_angles(t, kps, H, fps, w.ball_x, w.ball_y)
+        # full-body 3D pose: lift each person's 2D sequence, rotate into pitch axes with the
+        # broadcast camera (its rotation is usable even when the tripod fit is too loose for
+        # ball heights)
+        if np.isfinite(cams.P[:, 0, 0]).any():
+            import torch
+
+            from toonball.pose import lift
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            model = lift.load(str(WEIGHTS / "videopose3d_h36m_detectron_coco.bin"), device)
+            R_cam = lift.camera_rotations(cams.P, size)
+            for t in w.tracks:
+                t.pose3d = lift.lift_track(model, t, kps, R_cam, fps, device)
     store.put_df("state", world.to_frame(w))
     store.put_json("flights", w.flights)
     export(w, store.path("scene.json"), "clip.mp4")

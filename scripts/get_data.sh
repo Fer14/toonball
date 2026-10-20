@@ -12,6 +12,8 @@ weights() {
   [[ -f "$ROOT/weights/football-pitch-detection.pt" ]]  || $GDOWN -O "$ROOT/weights/football-pitch-detection.pt"  "https://drive.google.com/uc?id=1Ma5Kt86tgpdjCTKfum79YMgNnSjcoOyf"
   # body pose for avatar animation (Ultralytics YOLO11)
   [[ -f "$ROOT/weights/yolo11m-pose.pt" ]] || curl -sSL -o "$ROOT/weights/yolo11m-pose.pt" "https://github.com/ultralytics/assets/releases/download/v8.3.0/yolo11m-pose.pt"
+  # 2D → 3D pose lifting (VideoPose3D, Human3.6M, COCO input)
+  [[ -f "$ROOT/weights/videopose3d_h36m_detectron_coco.bin" ]] || curl -sSL -o "$ROOT/weights/videopose3d_h36m_detectron_coco.bin" "https://dl.fbaipublicfiles.com/video-pose-3d/pretrained_h36m_detectron_coco.bin"
 }
 
 dfl() {

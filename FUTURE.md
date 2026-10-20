@@ -20,34 +20,42 @@ Measured with the motion diagnostics after the calibration / goalkeeper / ball r
 
 ## Pose estimation for player animation
 
-### v1 (branch `pose-estimation`)
+### v2 — full-body 3D pose (branch `pose-estimation`)
 
-- **2D pose:** YOLO11m-pose on upscaled crops of every tracked box (`toonball/pose/estimate.py`,
-  cached as `pose.parquet`, about 1 min per 30 s clip).
-- **Angles** (`toonball/pose/angles.py`): limbs are assumed to swing in the sagittal plane, and
-  foreshortening is undone with s = facing · image-right. The weight drops when a player runs
-  at or away from the camera.
-- **Left/right legs are unreliable on 50–150 px players** (hip–hip correlation ≈ 0 while
-  running), so v1 exports only side-independent cues:
-  - gait phase, locked to the stride opening |lh − rh| with a second-order PLL (legs-apart
-    timing vs video: corr 0.35–0.53, against ≈ 0 for the procedural cycle)
-  - stride amplitude, mean knee and elbow bend, torso lean and roll
-- **Viewer:** knees and elbows added to the rig. Everything is blended with the procedural
-  cycle by reliability. The "pose from video" checkbox, or `&pose=0` in the URL, turns it off
-  for comparison.
-- **Found along the way:** the procedural cadence was about 5 steps/s at a jog. The stride
-  length is now 1.2 m + 0.4 × speed, about 3 steps/s, as measured.
+- **2D:** YOLO11m-pose on upscaled crops of every tracked box (`toonball/pose/estimate.py` →
+  `pose.parquet`).
+- **3D:** VideoPose3D (Human3.6M, COCO input), reimplemented in `toonball/pose/lift.py` and
+  loaded from the released checkpoint. It lifts each person's 2D sequence (±121 frames) to 17
+  joints and rotates them into pitch axes with the estimated broadcast camera. The constant
+  tilt between H36M's near-horizontal cameras and the elevated broadcast camera is removed by
+  making the median spine vertical. Left/right flips of the 2D model are fixed over time
+  before lifting.
+- **Viewer** (`applyPose3d`): skeleton body → pelvis → chest → head / shoulders → elbows,
+  pelvis → hips → knees. Every bone is aimed at its 3D direction, body facing comes from hips
+  and shoulders, and the lower foot stays on the grass. Fully pose-driven on 83–94 % of
+  visible player-frames. The scripted kick, keeper stance and dives only run where the pose
+  is missing.
+- **Ball in the keeper's hands:** possession is now also decided in the image (ball inside a
+  player's box), because a held ball projects ~5 m behind the keeper on the grass. A keeper
+  holding it in the upper half of his box carries it in his hands.
+- **Pass timing:** each possession is dated back to the first / last frame the ball was
+  really with that player (the 4-frame hysteresis used to keep it glued to the foot after
+  the kick).
+- **Known weakness:** poses are looser than the real ones (e.g. a crouched catch comes out
+  fairly upright); H36M has no football movements and our players are 50–150 px tall.
 
 ### Next
 
 - **Left/right:** resolve which leg leads from the foot on the ground (the lowest ankle, which
   stays still in pitch coordinates) instead of the model's L/R labels.
+- **Stronger lifting model:** MotionAGFormer / MotionBERT, or fine-tune the lifter on
+  football motion (e.g. synthetic data from a game engine).
+- **Foot locking:** keep a planted foot fixed on the grass in pitch coordinates (removes
+  sliding).
 - **Events from pose:** kicks (one leg far forward), headers (both ankles off the ground),
   throw-ins (both hands above the head), goalkeeper dives (torso near horizontal) — instead of
   inferring them from the ball alone.
-- **Better 3D:** lift 2D → 3D (MotionBERT / VideoPose3D) on per-track sequences, or
-  world-grounded mesh recovery (GVHMR, 4DHumans, CameraHMR) on closer shots, using the camera
-  matrix to keep feet planted.
-- **Retargeting** full joint rotations onto the rig once left/right is reliable.
+- **Mesh recovery on closer shots:** GVHMR, 4DHumans or CameraHMR for hand and head
+  detail.
 - **Faster crops:** RTMPose-m (≈5 ms per crop) if the pose pass becomes the bottleneck on long
   videos.
