@@ -304,7 +304,9 @@ def camera_rotations(P: np.ndarray, size: tuple[int, int]) -> np.ndarray:
         if not np.isfinite(P[t, 0, 0]):
             continue
         M = P[t, :, :3]
-        f = np.linalg.norm(M[0] - (w / 2) * M[2]) / np.linalg.norm(M[2])
+        f = np.linalg.norm(M[0] - (w / 2) * M[2]) / max(np.linalg.norm(M[2]), 1e-12)
+        if not np.isfinite(f) or f < 1.0:   # degenerate camera on this frame
+            continue
         Rm = np.linalg.inv(np.array([[f, 0, w / 2], [0, f, h / 2], [0, 0, 1.0]])) @ M
         Rm /= np.linalg.norm(Rm[2])
         if Rm[2, 2] > 0:      # the camera's forward axis must point down towards the grass

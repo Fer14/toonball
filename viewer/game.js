@@ -11,6 +11,8 @@ const LAYOUT = P.get("layout") || "pip";
 const RECORD = P.has("record");
 const USE_POSE = P.get("pose") !== "0";     // ?pose=0 → procedural animation only
 const FOCUS = P.has("focus") ? Number(P.get("focus")) : null;
+let followId = FOCUS;                       // player the camera follows (click one, or ?focus=)
+let povMode = P.get("pov") === "1";         // see through his eyes (?pov=1 or the POV button)
 document.body.classList.add(THEME, LAYOUT, ...(RECORD ? ["record"] : []));
 
 const L = 105, W = 68;                     // pitch metres
@@ -1061,6 +1063,13 @@ document.getElementById("chip1").style.background = scene_.teams[1];
 if (THEME === "toy") document.getElementById("brand").textContent = "TOY BOX FOOTBALL";
 
 const camPos = new THREE.Vector3(), camTarget = new THREE.Vector3();
+const smoothPos = new THREE.Vector3(), smoothTarget = new THREE.Vector3();
+let smoothInit = false;
+const followRing = new THREE.Mesh(new THREE.RingGeometry(0.7, 0.95, 32),
+  new THREE.MeshBasicMaterial({ color: 0xffe14d, transparent: true, opacity: 0.9, depthWrite: false }));
+followRing.rotation.x = -Math.PI / 2;
+followRing.visible = false;
+scene.add(followRing);
 function update(f) {
   f = clamp(f, 0, N - 1);
   for (const pl of players) updatePlayer(pl, f);
@@ -1123,14 +1132,43 @@ function update(f) {
     camTarget.set(0, 0, 2);
     camPos.set(0, 72, 92);
   }
-  // ?focus=<player id>: close-up camera on one player (to inspect the pose)
-  const fp = FOCUS == null ? null : players.find((q) => q.p.id === FOCUS);
+  // following a player: chase camera behind him, or his point of view
+  const fp = followId == null ? null : players.find((q) => q.p.id === followId);
+  for (const q of players) q.head.visible = true;
+  let fov = 30;
   if (fp && fp.root.visible) {
-    camTarget.copy(fp.root.position).setY(1.1);
-    camPos.copy(camTarget).add(new THREE.Vector3(0, 2.5, 9));
+    fp.root.updateMatrixWorld(true);
+    if (povMode) {
+      // eyes: front of the head, looking where the head points (a little down, at the play)
+      const eye = fp.head.localToWorld(new THREE.Vector3(0, 0.05, 0.3));
+      const look = fp.head.localToWorld(new THREE.Vector3(0, -0.25, 10));
+      fp.head.visible = false;
+      camPos.copy(eye);
+      camTarget.copy(look);
+      fov = 70;
+    } else {
+      const yaw = fp.root.rotation.y, back = new THREE.Vector3(-Math.sin(yaw), 0, -Math.cos(yaw));
+      camTarget.copy(fp.root.position).setY(1.2);
+      camPos.copy(camTarget).addScaledVector(back, 8).add(new THREE.Vector3(0, 3.2, 0));
+      fov = 45;
+    }
   }
-  camera.position.copy(camPos);
-  camera.lookAt(camTarget);
+  if (camera.fov !== fov) { camera.fov = fov; camera.updateProjectionMatrix(); }
+  if (fp && fp.root.visible) {  // ease the follow cameras (players turn quickly); recordings
+                                // step frames in order, so this stays deterministic there too
+    const k = povMode ? 0.35 : 0.12;
+    smoothPos.lerp(camPos, smoothInit ? k : 1);
+    smoothTarget.lerp(camTarget, smoothInit ? k : 1);
+    smoothInit = true;
+    camera.position.copy(smoothPos);
+    camera.lookAt(smoothTarget);
+  } else {
+    smoothInit = false;
+    camera.position.copy(camPos);
+    camera.lookAt(camTarget);
+  }
+  followRing.visible = !!(fp && fp.root.visible && !povMode);
+  if (followRing.visible) followRing.position.set(fp.root.position.x, 0.03, fp.root.position.z);
   sun.position.set(camTarget.x - 30, 60, camTarget.z + 20);
   sun.target.position.copy(camTarget);
 
@@ -1210,6 +1248,79 @@ window.__seekStep = async (f) => {
 window.__frame = (f, q = 0.92) => { update(f); return renderer.domElement.toDataURL("image/jpeg", q); };
 
 if (!RECORD) {
+  // ── minimise / restore the real match (remembered per browser) ──
+  const pip = document.getElementById("pip");
+  const store = (k, v) => { try { v === undefined ? localStorage.removeItem(k) : localStorage.setItem(k, v); } catch {} };
+  const stored = (k) => { try { return localStorage.getItem(k); } catch { return null; } };
+  const setMin = (on) => { pip.classList.toggle("min", on); store("toonball.pipMin", on ? "1" : undefined); };
+  setMin(stored("toonball.pipMin") === "1");
+  document.getElementById("pipMin").onclick = () => setMin(true);
+  document.getElementById("pipTab").onclick = () => setMin(false);
+
+  // ── click a player to follow him; Follow / POV / ✕ ──
+  const bar = document.getElementById("follow"), label = document.getElementById("followLabel");
+  const camBtn = document.getElementById("followCam"), povBtn = document.getElementById("followPov");
+  const refreshBar = () => {
+    const pl = players.find((q) => q.p.id === followId);
+    bar.classList.toggle("on", !!pl);
+    if (!pl) return;
+    const p = pl.p, num = shirtNumber.get(p.id);
+    const who = p.role === "referee" ? "Referee" : p.role === "goalkeeper" ? "Keeper" : "Player";
+    const side = p.team === 0 ? " · HOME" : p.team === 1 ? " · AWAY" : "";
+    label.textContent = `${who}${num ? " #" + num : ""}${side}`;
+    document.getElementById("followChip").style.background = p.team >= 0 ? scene_.teams[p.team] : "#111";
+    camBtn.classList.toggle("active", !povMode);
+    povBtn.classList.toggle("active", povMode);
+  };
+  const follow = (id) => { followId = id; if (id == null) povMode = false; smoothInit = false; refreshBar(); };
+  camBtn.onclick = () => { povMode = false; refreshBar(); };
+  povBtn.onclick = () => { povMode = true; refreshBar(); };
+  document.getElementById("followOff").onclick = () => follow(null);
+  addEventListener("keydown", (e) => {
+    if (e.key === "Escape") follow(null);
+    if ((e.key === "p" || e.key === "P") && followId != null) { povMode = !povMode; refreshBar(); }
+  });
+  const ray = new THREE.Raycaster(), ndc = new THREE.Vector2();
+  let down = null;
+  renderer.domElement.addEventListener("pointerdown", (e) => (down = [e.clientX, e.clientY]));
+  renderer.domElement.addEventListener("pointerup", (e) => {
+    if (!down || Math.hypot(e.clientX - down[0], e.clientY - down[1]) > 6) return;  // a drag
+    const r = renderer.domElement.getBoundingClientRect();
+    ndc.set(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
+    ray.setFromCamera(ndc, camera);
+    const visible = players.filter((q) => q.root.visible);
+    const hit = ray.intersectObjects(visible.map((q) => q.root), true)[0];
+    if (hit) {
+      let o = hit.object;
+      while (o && !visible.some((q) => q.root === o)) o = o.parent;
+      const pl = visible.find((q) => q.root === o);
+      if (pl) follow(pl.p.id);
+    } else {
+      // generous click: the nearest player on screen within ~40 px
+      let best = null, bd = 40;
+      for (const q of visible) {
+        const v = q.root.position.clone().setY(1.2).project(camera);
+        const d = Math.hypot((v.x - ndc.x) * r.width / 2, (v.y - ndc.y) * r.height / 2);
+        if (d < bd) { bd = d; best = q; }
+      }
+      if (best) follow(best.p.id);
+    }
+  });
+  refreshBar();
+  // test hook: screen position of the visible player nearest the screen centre
+  window.__pickable = () => {
+    const r = renderer.domElement.getBoundingClientRect();
+    let best = null, bd = Infinity;
+    for (const q of players) {
+      if (!q.root.visible) continue;
+      const v = q.root.position.clone().setY(1.0).project(camera);
+      if (Math.abs(v.x) > 0.9 || Math.abs(v.y) > 0.9) continue;
+      const d = Math.hypot(v.x, v.y);
+      if (d < bd) { bd = d; best = { id: q.p.id, x: r.left + (v.x + 1) / 2 * r.width, y: r.top + (1 - v.y) / 2 * r.height }; }
+    }
+    return best;
+  };
+
   const video = document.getElementById("broadcast");
   video.src = `${RUN}/${scene_.video}`;
   const seek = document.getElementById("seek"), play = document.getElementById("play");
