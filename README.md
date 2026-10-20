@@ -113,7 +113,7 @@ Measured by the pipeline (no ground truth involved):
 ² Share of on-screen player-frames driven fully by the 3D pose.
 ³ How well one fixed camera explains all frames; ball height is only estimated below 30 px.
 
-**Other broadcasts:** on highlight reels from other leagues (720p, tighter zooms, constant cuts) the calibration doesn't hold yet and the reconstruction is far off. See [#9](https://github.com/Fer14/toonball/issues/9).
+**Other broadcasts:** on highlight reels from other leagues (720p, tighter zooms, constant cuts) the calibration doesn't hold yet and the reconstruction is far off. See [#1](https://github.com/Fer14/toonball/issues/1).
 
 ---
 
@@ -211,7 +211,7 @@ tests/
 ```
 
 Design notes: [PLAN.md](PLAN.md). Known issues and next steps: [FUTURE.md](FUTURE.md) and
-[#9](https://github.com/Fer14/toonball/issues/9).
+[#1](https://github.com/Fer14/toonball/issues/1).
 
 ## Credits
 

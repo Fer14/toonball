@@ -4,9 +4,9 @@
 
 - [ ] **Other broadcasts look far off** (Kaggle highlight reels from other leagues):
   calibration, kit colours and shot selection. Tracked in
-  [#9](https://github.com/Fer14/toonball/issues/9).
+  [#1](https://github.com/Fer14/toonball/issues/1).
 - [ ] **3D pose exaggerates crouches**: in 573e61_0 the keeper briefly lies flat after his
-  catch, while the real keeper is crouched low (see #9).
+  catch, while the real keeper is crouched low (see #1).
 
 Measured with the motion diagnostics after the calibration / goalkeeper / ball rewrite.
 
