@@ -9,56 +9,34 @@ from **one ordinary broadcast video**: who is where, which team, how each player
 where the ball is and how high it flies. It then replays the match in a Three.js game world
 where you can follow any player, or watch through his eyes.
 
-
-
 https://github.com/user-attachments/assets/6e8eec78-4a2d-4c37-8326-9294a18ea098
-
 
 *Cartoon = toonball's reconstruction; bottom-right = the real broadcast it was computed from.*
 
 ### Click a player to follow him
 
-
-
 https://github.com/user-attachments/assets/b2e8f0f0-5ab4-4683-9f6d-ba420eeccbf1
-
 
 ### …or watch his point of view
 
-
-
 https://github.com/user-attachments/assets/287728f7-431f-4346-9dcc-1d092b2ca1e2
-
 
 ### The whole pitch, all 22 players
 
 The broadcast camera sees about a third of the pitch. toonball keeps the players it can't see
 moving with their team (here with a 9 m lofted pass).
 
-
-
 https://github.com/user-attachments/assets/763363a2-4fc6-4a50-9f10-2764206e491a
-
 
 ### More clips
 
-
+The keeper catches the ball, carries it in his hands and throws it:
 
 https://github.com/user-attachments/assets/5653bcfd-c6ad-4d06-8da9-b22bbd74e7ba
 
-
 https://github.com/user-attachments/assets/d5464a1c-d0f8-4881-8904-caa25fdf1f21
 
-
 https://github.com/user-attachments/assets/2695c7da-0f67-4be2-85a3-6ae41684282d
-
-
-
-Full 30 s videos:
-- broadcast view: [0bfacc_0](docs/0bfacc_0.mp4) · [573e61_0](docs/573e61_0.mp4) · [121364_0](docs/121364_0.mp4) · [08fd33_0](docs/08fd33_0.mp4)
-- follow the keeper: [573e61_0](docs/573e61_0_follow_keeper.mp4)
-- point of view: [0bfacc_0](docs/0bfacc_0_pov.mp4)
-- whole pitch: [2e57b9_0](docs/2e57b9_0_whole_pitch.mp4)
 
 Clips are from the [DFL Bundesliga Data Shootout](https://www.kaggle.com/competitions/dfl-bundesliga-data-shootout).
 
