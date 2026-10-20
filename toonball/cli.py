@@ -152,6 +152,7 @@ def make(
     layout: str = typer.Option("pip", help="pip | side | game"),
     min_shot: float = typer.Option(3.0, help="shortest wide shot kept (s)"),
     force: bool = typer.Option(False, help="recompute cached stages"),
+    record: bool = typer.Option(True, help="render MP4s (off: only scene.json for the viewer)"),
 ):
     """Any football video → cartoon video. Cuts, replays and close-ups are skipped."""
     from toonball.io import shots
@@ -180,7 +181,11 @@ def make(
         st.put_json("source", {"video": str(video), **s})
         _pipeline(st, force)
         ref = _align_teams(st.path("scene.json"), ref)
-        parts.append(_record(st.dir, theme, layout))
+        if record:
+            parts.append(_record(st.dir, theme, layout))
+    if not record:
+        typer.echo(f"viewer: /viewer/index.html?run=/runs/{top.dir.name}/shots/NN")
+        return
 
     out = top.dir / f"{top.dir.name}_{layout}_{theme}.mp4"
     lst = top.path("concat.txt")

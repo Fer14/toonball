@@ -68,10 +68,13 @@ def _centres(tracks: list[Track], F: int) -> dict[int, np.ndarray]:
     return out
 
 
-def _chain(pieces: list[Track], centre: np.ndarray, slots: int) -> list[list[Track]]:
+def _chain(pieces: list[Track], centre: np.ndarray, slots: int,
+           people: list[list[Track]] | None = None) -> tuple[list[list[Track]], list[Track]]:
     """Assign track pieces to at most `slots` people: a piece continues the person (free at its
-    start) whose team-relative position predicts its start best."""
-    people: list[list[Track]] = []
+    start) whose team-relative position predicts its start best. Pieces that fit nobody once the
+    team is full are returned as overflow (wrong team colour, or a double track)."""
+    people = [] if people is None else people
+    overflow: list[Track] = []
     for p in sorted(pieces, key=lambda t: _span(t)[0]):
         s0, _ = _span(p)
         best, best_d = None, np.inf
@@ -93,9 +96,11 @@ def _chain(pieces: list[Track], centre: np.ndarray, slots: int) -> list[list[Tra
                 best, best_d = k, d
         if best is not None and (len(people) >= slots or best_d < 15.0):
             people[best].append(p)
-        else:
+        elif len(people) < slots:
             people.append([p])
-    return people
+        else:
+            overflow.append(p)
+    return people, overflow
 
 
 def _outside_view(xy: np.ndarray, polys: list, margin: float = 2.0) -> np.ndarray:
@@ -181,6 +186,21 @@ def fill(tracks: list[Track], H: np.ndarray, size: tuple[int, int], fps: float,
     out: list[Track] = []
     remap: dict[int, int] = {}
 
+    # outfield identities per team, capped at 10; overflow is offered to the other team (a
+    # team-colour mistake) and dropped if it fits there neither
+    chains_by_team, overflow = {}, {}
+    for team in (0, 1):
+        pieces = [t for t in tracks if t.team == team and t.role == "player"]
+        chains_by_team[team], overflow[team] = _chain(pieces, centre[team], TEAM_SIZE - 1)
+    for team in (0, 1):
+        other = 1 - team
+        for p in overflow[team]:
+            p.team = other
+        chains_by_team[other], rest = _chain(overflow[team], centre[other], TEAM_SIZE - 1,
+                                             chains_by_team[other])
+        for p in rest:
+            p.team = team  # fits neither: dropped below (no person holds it)
+
     def add(role, team, xy, seen, chain, colour=None):
         nid = len(out)
         speed = np.hypot(*np.gradient(xy, axis=0).T) * fps
@@ -194,25 +214,26 @@ def fill(tracks: list[Track], H: np.ndarray, size: tuple[int, int], fps: float,
     for team in (0, 1):
         towards = 1.0 if side[team] == 0 else -1.0   # +x attacks for the team defending x=0
         gks = [t for t in tracks if t.team == team and t.role == "goalkeeper"]
-        outfield = [t for t in tracks if t.team == team and t.role == "player"]
-        chains = _chain(outfield, centre[team], TEAM_SIZE - 1)
+        chains = chains_by_team[team]
         for chain in chains:
             xy, seen = _person(chain, centre[team], F, polys, fps)
             add("player", team, xy, seen, chain)
         # never-seen outfield players: free 4-4-2 places, away from everyone we know about
         known = [o for o in out if o.team == team and o.role == "player"]
-        for dx, dy in FORMATION:
-            if len(known) >= TEAM_SIZE - 1:
-                break
-            slot = centre[team] + np.array([towards * dx, dy])
-            slot[:, 1] = np.clip(slot[:, 1], 2, pitch.WIDTH - 2)
-            near = min((np.nanmedian(np.hypot(o.x - slot[:, 0], o.y - slot[:, 1]))
-                        for o in known), default=np.inf)
-            if near < 8.0:
-                continue
-            xy = _outside_view(slot, polys)
-            add("player", team, xy, np.zeros(F, bool), [])
-            known.append(out[-1])
+        used = set()
+        for spacing in (8.0, 0.0):  # second pass: fill up even if places are crowded
+            for k, (dx, dy) in enumerate(FORMATION):
+                if len(known) >= TEAM_SIZE - 1 or k in used:
+                    continue
+                slot = centre[team] + np.array([towards * dx, dy])
+                slot[:, 1] = np.clip(slot[:, 1], 2, pitch.WIDTH - 2)
+                near = min((np.nanmedian(np.hypot(o.x - slot[:, 0], o.y - slot[:, 1]))
+                            for o in known), default=np.inf)
+                if near < spacing:
+                    continue
+                add("player", team, _outside_view(slot, polys), np.zeros(F, bool), [])
+                known.append(out[-1])
+                used.add(k)
         # keeper: his track pieces, else standing in his goal shadowing the ball
         goal_x = 4.0 if side[team] == 0 else pitch.LENGTH - 4.0
         if gks:
