@@ -9,30 +9,50 @@ from **one ordinary broadcast video**: who is where, which team, how each player
 where the ball is and how high it flies. It then replays the match in a Three.js game world
 where you can follow any player, or watch through his eyes.
 
-<p align="center"><img src="https://github.com/Fer14/toonball/blob/media/readme/broadcast_0bfacc_0.gif?raw=true" width="100%" alt="toonball: broadcast view of Bundesliga clip 0bfacc_0, real match bottom-right"></p>
+
+
+https://github.com/user-attachments/assets/6e8eec78-4a2d-4c37-8326-9294a18ea098
+
 
 *Cartoon = toonball's reconstruction; bottom-right = the real broadcast it was computed from.*
 
 ### Click a player to follow him
 
-<p align="center"><img src="https://github.com/Fer14/toonball/blob/media/readme/follow_keeper_573e61_0.gif?raw=true" width="100%" alt="following the keeper in clip 573e61_0: he walks out with the ball in his hands and throws it"></p>
+
+
+https://github.com/user-attachments/assets/b2e8f0f0-5ab4-4683-9f6d-ba420eeccbf1
+
 
 ### …or watch his point of view
 
-<p align="center"><img src="https://github.com/Fer14/toonball/blob/media/readme/pov_0bfacc_0.gif?raw=true" width="100%" alt="first-person view of player #9 in clip 0bfacc_0"></p>
+
+
+https://github.com/user-attachments/assets/287728f7-431f-4346-9dcc-1d092b2ca1e2
+
 
 ### The whole pitch, all 22 players
 
 The broadcast camera sees about a third of the pitch. toonball keeps the players it can't see
 moving with their team (here with a 9 m lofted pass).
 
-<p align="center"><img src="https://github.com/Fer14/toonball/blob/media/readme/wide_2e57b9_0.gif?raw=true" width="100%" alt="whole-pitch camera on clip 2e57b9_0 with a lofted pass"></p>
+
+
+https://github.com/user-attachments/assets/763363a2-4fc6-4a50-9f10-2764206e491a
+
 
 ### More clips
 
-<p align="center"><img src="https://github.com/Fer14/toonball/blob/media/readme/keeper_573e61_0.gif?raw=true" width="100%" alt="clip 573e61_0: the keeper catches the ball and carries it in his hands"></p>
-<p align="center"><img src="https://github.com/Fer14/toonball/blob/media/readme/broadcast_121364_0.gif?raw=true" width="100%" alt="clip 121364_0"></p>
-<p align="center"><img src="https://github.com/Fer14/toonball/blob/media/readme/broadcast_08fd33_0.gif?raw=true" width="100%" alt="clip 08fd33_0"></p>
+
+
+https://github.com/user-attachments/assets/5653bcfd-c6ad-4d06-8da9-b22bbd74e7ba
+
+
+https://github.com/user-attachments/assets/d5464a1c-d0f8-4881-8904-caa25fdf1f21
+
+
+https://github.com/user-attachments/assets/2695c7da-0f67-4be2-85a3-6ae41684282d
+
+
 
 Full 30 s videos:
 - broadcast view: [0bfacc_0](docs/0bfacc_0.mp4) · [573e61_0](docs/573e61_0.mp4) · [121364_0](docs/121364_0.mp4) · [08fd33_0](docs/08fd33_0.mp4)
