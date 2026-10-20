@@ -11,6 +11,8 @@ const LAYOUT = P.get("layout") || "pip";
 const RECORD = P.has("record");
 const USE_POSE = P.get("pose") !== "0";     // ?pose=0 → procedural animation only
 const FOCUS = P.has("focus") ? Number(P.get("focus")) : null;
+let followId = FOCUS;                       // player the camera follows (click one, or ?focus=)
+let povMode = P.get("pov") === "1";         // see through his eyes (?pov=1 or the POV button)
 document.body.classList.add(THEME, LAYOUT, ...(RECORD ? ["record"] : []));
 
 const L = 105, W = 68;                     // pitch metres
@@ -128,6 +130,44 @@ for (const p of scene_.players) {
     }
   }
 }
+
+// how dangerous the moment is: ball near a goal and moving fast → the crowd gets up
+const GOAL_HALF = 7.32 / 2;
+const goals = [];                           // { f, team } — team that scored
+const excitement = new Float32Array(N);
+{
+  // which goal each team defends: from its keeper's average position
+  const defendsLeft = {};
+  for (const team of [0, 1]) {
+    const gk = scene_.players.find((p) => p.role === "goalkeeper" && p.team === team);
+    const mx = gk ? gk.x.reduce((a, b) => a + b, 0) / gk.x.length : (team ? L * 0.75 : L * 0.25);
+    defendsLeft[team] = mx < L / 2;
+  }
+  const forced = P.has("goal") ? Number(P.get("goal")) : null;   // ?goal=<frame>: preview
+  for (let f = 1; f < N; f++) {
+    const x = ball.x[f], y = ball.y[f], z = ball.z[f] ?? 0;
+    const inGoal = x != null && (x < 0.3 || x > L - 0.3) && Math.abs(y - W / 2) < GOAL_HALF && z < 2.44;
+    if ((inGoal || f === forced) && (!goals.length || f - goals[goals.length - 1].f > 10 * FPS)) {
+      const leftGoal = x != null ? x < L / 2 : true;
+      goals.push({ f, team: defendsLeft[0] === leftGoal ? 1 : 0 });
+    }
+    if (x == null) continue;
+    const d = Math.min(Math.hypot(x, y - W / 2), Math.hypot(L - x, y - W / 2));
+    const sp = Math.hypot(x - (ball.x[f - 1] ?? x), y - (ball.y[f - 1] ?? y)) * FPS;
+    excitement[f] = clamp((35 - d) / 25, 0, 1) * (0.4 + 0.6 * clamp(sp / 12, 0, 1));
+  }
+  for (const g of goals) for (let f = g.f; f < Math.min(N, g.f + 6 * FPS); f++) excitement[f] = 1;
+  // rise and calm down over ~1 s (forward + backward smoothing keeps it deterministic)
+  for (const dir of [1, -1]) {
+    let v = 0;
+    for (let k = 0; k < N; k++) {
+      const f = dir > 0 ? k : N - 1 - k;
+      v += (excitement[f] - v) * (excitement[f] > v ? 0.15 : 0.04);
+      excitement[f] = Math.max(excitement[f] * 0.5, v);
+    }
+  }
+}
+const goalAt = (f) => goals.find((g) => f >= g.f && f < g.f + 4 * FPS) ?? null;
 
 // ─────────────────────────── renderer ───────────────────────────
 const stage = document.getElementById("stage");
@@ -296,6 +336,48 @@ function adBoards(len, z, colours) {
   return m;
 }
 
+// ── crowd: instanced fans in both teams' colours; idle sway, on their feet when it gets
+// dangerous near a goal, jumping for goals ───────────────────────────────────────────────
+const FANS = [];
+let crowd = null;
+
+function buildCrowd() {
+  const r = rng(42), n = FANS.length;
+  const body = new THREE.InstancedMesh(new THREE.CapsuleGeometry(0.3, 0.45, 3, 8),
+                                       new THREE.MeshStandardMaterial({ roughness: 0.8 }), n);
+  const head = new THREE.InstancedMesh(new THREE.SphereGeometry(0.24, 10, 8),
+                                       new THREE.MeshStandardMaterial({ roughness: 0.7 }), n);
+  const kit = [scene_.teams[0], scene_.teams[1]].map((c) => new THREE.Color(c ?? "#ffffff"));
+  const other = ["#ffffff", "#1d2433", "#f1c40f", "#e74c3c"].map((c) => new THREE.Color(c));
+  const phase = new Float32Array(n), rate = new Float32Array(n);
+  for (let k = 0; k < n; k++) {
+    const u = r();
+    body.setColorAt(k, u < 0.45 ? kit[0] : u < 0.9 ? kit[1] : other[Math.floor(r() * other.length)]);
+    head.setColorAt(k, new THREE.Color(SKIN[Math.floor(r() * SKIN.length)]));
+    phase[k] = r() * Math.PI * 2;
+    rate[k] = 0.6 + r() * 0.8;
+  }
+  scene.add(body, head);
+  crowd = { body, head, phase, rate };
+}
+
+const _m = new THREE.Matrix4();
+function updateCrowd(f) {
+  if (!crowd) return;
+  const t = f / FPS, e = excitement[clamp(Math.round(f), 0, N - 1)];
+  for (let k = 0; k < FANS.length; k++) {
+    const p = FANS[k], ph = crowd.phase[k];
+    const sway = Math.sin(t * crowd.rate[k] * 2 + ph) * 0.04;
+    const jump = e * Math.max(0, Math.sin(t * (5 + crowd.rate[k] * 3) + ph)) * 0.7;
+    const y = p.y + 0.55 + sway + jump;
+    _m.makeTranslation(p.x, y, p.z);
+    crowd.body.setMatrixAt(k, _m);
+    _m.makeTranslation(p.x, y + 0.6, p.z);
+    crowd.head.setMatrixAt(k, _m);
+  }
+  crowd.body.instanceMatrix.needsUpdate = crowd.head.instanceMatrix.needsUpdate = true;
+}
+
 function buildStadium() {
   scene.background = canvasTex(4, 512, (g, w, h) => {
     const gr = g.createLinearGradient(0, 0, 0, h);
@@ -327,7 +409,17 @@ function buildStadium() {
     g.position.set(s.pos[0], 0, s.pos[1]);
     g.rotation.y = s.rot;
     scene.add(g);
+    g.updateMatrixWorld(true);
+    for (let t = 0; t < 4; t++) {               // two rows of fans standing on each tier
+      for (const dz of [1.3, -1.1]) {
+        for (let x = -s.len / 2 + 0.6; x < s.len / 2 - 0.6; x += 0.85) {
+          FANS.push(g.localToWorld(new THREE.Vector3(x + (Math.random() - 0.5) * 0.2, 3 + t * 3,
+                                                     -t * 5 + dz)));
+        }
+      }
+    }
   }
+  buildCrowd();
   scene.add(adBoards(L + 10, W / 2 + 5, ["#2b8cff", "#e5293b", "#1d2433"]));
   const track = new THREE.Mesh(new THREE.PlaneGeometry(L + 40, 14),
                                new THREE.MeshStandardMaterial({ color: 0x3f8f45, roughness: 1 }));
@@ -517,6 +609,14 @@ function makePlayer(p) {
   if (role === "referee") {
     add(chest, new THREE.BoxGeometry(0.58, 0.08, 0.5), M("#ffd400"), 0, 0.53, 0);
   }
+  if (shirtNumber.has(p.id)) {                // number on the back of the shirt
+    const num = new THREE.Mesh(new THREE.PlaneGeometry(0.36, 0.36),
+                               M("#ffffff", { map: numberTexture(shirtNumber.get(p.id), shirt) }));
+    num.material.alphaTest = 0.5;
+    num.position.set(0, 0.36, -0.3);
+    num.rotation.y = Math.PI;
+    chest.add(num);
+  }
   let base = null;
   if (toy) {                                  // table-football style base
     base = add(root, new THREE.CylinderGeometry(0.42, 0.5, 0.16, 24), M(shade(shirt, 0.8)), 0, 0.08, 0);
@@ -526,6 +626,40 @@ function makePlayer(p) {
   scene.add(root);
   return { p, root, body, pelvis, chest, legs, knees, arms, elbows, head, base, mats,
            touches: touchesAt.get(p.id) ?? [] };
+}
+
+// shirt numbers by position (reading the real numbers needs a jersey-OCR model, see FUTURE.md):
+// keeper 1; defenders 2–5, midfield 6, 7, 8, 11, forwards 9, 10 — ordered across the pitch
+const shirtNumber = new Map();
+for (const team of [0, 1]) {
+  const ps = scene_.players.filter((p) => p.team === team);
+  const gk = ps.find((p) => p.role === "goalkeeper");
+  if (gk) shirtNumber.set(gk.id, 1);
+  const mean = (a) => a.reduce((s, v) => s + v, 0) / a.length;
+  const left = gk ? mean(gk.x) < L / 2 : team === 0;
+  const out = ps.filter((p) => p.role === "player")
+    .map((p) => ({ id: p.id, depth: left ? mean(p.x) : L - mean(p.x), across: mean(p.y) }))
+    .sort((a, b) => a.depth - b.depth);
+  const lines = [[2, 4, 5, 3], [7, 6, 8, 11], [9, 10]];
+  let k = 0;
+  for (const line of lines) {
+    const group = out.slice(k, k + line.length).sort((a, b) => a.across - b.across);
+    group.forEach((p, j) => shirtNumber.set(p.id, line[j]));
+    k += line.length;
+  }
+  out.slice(k).forEach((p, j) => shirtNumber.set(p.id, 12 + j));
+}
+
+function numberTexture(n, shirt) {
+  const light = new THREE.Color(shirt).getHSL({}).l > 0.6;
+  return canvasTex(128, 128, (g) => {
+    g.font = "bold 92px Trebuchet MS, sans-serif";
+    g.textAlign = "center"; g.textBaseline = "middle";
+    g.lineWidth = 8; g.strokeStyle = light ? "#ffffff" : "#1d2433";
+    g.strokeText(String(n), 64, 70);
+    g.fillStyle = light ? "#1d2433" : "#ffffff";
+    g.fillText(String(n), 64, 70);
+  });
 }
 
 const players = scene_.players.map(makePlayer);
@@ -658,6 +792,15 @@ function updatePlayer(pl, f) {
   }
   if (w3 > 0) applyPose3d(pl, i, w3, baseY);
   if (pl.plant && !BUILDING_PLANTS) plantFeet(pl, f);
+  const goal = goalAt(f);                     // the scoring team celebrates: jumps, arms up
+  if (goal && p.team === goal.team) {
+    const hop = Math.abs(Math.sin((f - goal.f) * 0.35 + p.id));
+    pl.body.position.y += 0.35 * hop;
+    for (const [k, sx] of [[0, -1], [1, 1]]) {
+      pl.arms[k].rotation.set(-2.7 + 0.3 * hop, 0, 0.35 * sx);
+      pl.elbows[k].rotation.set(-0.2, 0, 0);
+    }
+  }
 }
 
 // ── 3D pose retargeting (joints from toonball/pose/lift.py, H36M order, cm, pitch x / y / z-up)
@@ -914,11 +1057,19 @@ function animateKeeper(pl, f, i, speed, ph, baseY) {
 }
 
 const clockEl = document.getElementById("clock");
+const goalEl = document.getElementById("goal");
 document.getElementById("chip0").style.background = scene_.teams[0];
 document.getElementById("chip1").style.background = scene_.teams[1];
 if (THEME === "toy") document.getElementById("brand").textContent = "TOY BOX FOOTBALL";
 
 const camPos = new THREE.Vector3(), camTarget = new THREE.Vector3();
+const smoothPos = new THREE.Vector3(), smoothTarget = new THREE.Vector3();
+let smoothInit = false;
+const followRing = new THREE.Mesh(new THREE.RingGeometry(0.7, 0.95, 32),
+  new THREE.MeshBasicMaterial({ color: 0xffe14d, transparent: true, opacity: 0.9, depthWrite: false }));
+followRing.rotation.x = -Math.PI / 2;
+followRing.visible = false;
+scene.add(followRing);
 function update(f) {
   f = clamp(f, 0, N - 1);
   for (const pl of players) updatePlayer(pl, f);
@@ -981,17 +1132,50 @@ function update(f) {
     camTarget.set(0, 0, 2);
     camPos.set(0, 72, 92);
   }
-  // ?focus=<player id>: close-up camera on one player (to inspect the pose)
-  const fp = FOCUS == null ? null : players.find((q) => q.p.id === FOCUS);
+  // following a player: chase camera behind him, or his point of view
+  const fp = followId == null ? null : players.find((q) => q.p.id === followId);
+  for (const q of players) q.head.visible = true;
+  let fov = 30;
   if (fp && fp.root.visible) {
-    camTarget.copy(fp.root.position).setY(1.1);
-    camPos.copy(camTarget).add(new THREE.Vector3(0, 2.5, 9));
+    fp.root.updateMatrixWorld(true);
+    if (povMode) {
+      // eyes: front of the head, looking where the head points (a little down, at the play)
+      const eye = fp.head.localToWorld(new THREE.Vector3(0, 0.05, 0.3));
+      const look = fp.head.localToWorld(new THREE.Vector3(0, -0.25, 10));
+      fp.head.visible = false;
+      camPos.copy(eye);
+      camTarget.copy(look);
+      fov = 70;
+    } else {
+      const yaw = fp.root.rotation.y, back = new THREE.Vector3(-Math.sin(yaw), 0, -Math.cos(yaw));
+      camTarget.copy(fp.root.position).setY(1.2);
+      camPos.copy(camTarget).addScaledVector(back, 8).add(new THREE.Vector3(0, 3.2, 0));
+      fov = 45;
+    }
   }
-  camera.position.copy(camPos);
-  camera.lookAt(camTarget);
+  if (camera.fov !== fov) { camera.fov = fov; camera.updateProjectionMatrix(); }
+  if (fp && fp.root.visible) {  // ease the follow cameras (players turn quickly); recordings
+                                // step frames in order, so this stays deterministic there too
+    const k = povMode ? 0.35 : 0.12;
+    smoothPos.lerp(camPos, smoothInit ? k : 1);
+    smoothTarget.lerp(camTarget, smoothInit ? k : 1);
+    smoothInit = true;
+    camera.position.copy(smoothPos);
+    camera.lookAt(smoothTarget);
+  } else {
+    smoothInit = false;
+    camera.position.copy(camPos);
+    camera.lookAt(camTarget);
+  }
+  followRing.visible = !!(fp && fp.root.visible && !povMode);
+  if (followRing.visible) followRing.position.set(fp.root.position.x, 0.03, fp.root.position.z);
   sun.position.set(camTarget.x - 30, 60, camTarget.z + 20);
   sun.target.position.copy(camTarget);
 
+  updateCrowd(f);
+  const goal = goalAt(f);
+  goalEl.style.display = goal ? "block" : "none";
+  if (goal) goalEl.style.background = scene_.teams[goal.team] ?? "#e5293b";
   const t = f / FPS;
   clockEl.textContent = `${String(Math.floor(t / 60)).padStart(2, "0")}:${String(Math.floor(t % 60)).padStart(2, "0")}`;
   renderer.render(scene, camera);
@@ -1064,6 +1248,79 @@ window.__seekStep = async (f) => {
 window.__frame = (f, q = 0.92) => { update(f); return renderer.domElement.toDataURL("image/jpeg", q); };
 
 if (!RECORD) {
+  // ── minimise / restore the real match (remembered per browser) ──
+  const pip = document.getElementById("pip");
+  const store = (k, v) => { try { v === undefined ? localStorage.removeItem(k) : localStorage.setItem(k, v); } catch {} };
+  const stored = (k) => { try { return localStorage.getItem(k); } catch { return null; } };
+  const setMin = (on) => { pip.classList.toggle("min", on); store("toonball.pipMin", on ? "1" : undefined); };
+  setMin(stored("toonball.pipMin") === "1");
+  document.getElementById("pipMin").onclick = () => setMin(true);
+  document.getElementById("pipTab").onclick = () => setMin(false);
+
+  // ── click a player to follow him; Follow / POV / ✕ ──
+  const bar = document.getElementById("follow"), label = document.getElementById("followLabel");
+  const camBtn = document.getElementById("followCam"), povBtn = document.getElementById("followPov");
+  const refreshBar = () => {
+    const pl = players.find((q) => q.p.id === followId);
+    bar.classList.toggle("on", !!pl);
+    if (!pl) return;
+    const p = pl.p, num = shirtNumber.get(p.id);
+    const who = p.role === "referee" ? "Referee" : p.role === "goalkeeper" ? "Keeper" : "Player";
+    const side = p.team === 0 ? " · HOME" : p.team === 1 ? " · AWAY" : "";
+    label.textContent = `${who}${num ? " #" + num : ""}${side}`;
+    document.getElementById("followChip").style.background = p.team >= 0 ? scene_.teams[p.team] : "#111";
+    camBtn.classList.toggle("active", !povMode);
+    povBtn.classList.toggle("active", povMode);
+  };
+  const follow = (id) => { followId = id; if (id == null) povMode = false; smoothInit = false; refreshBar(); };
+  camBtn.onclick = () => { povMode = false; refreshBar(); };
+  povBtn.onclick = () => { povMode = true; refreshBar(); };
+  document.getElementById("followOff").onclick = () => follow(null);
+  addEventListener("keydown", (e) => {
+    if (e.key === "Escape") follow(null);
+    if ((e.key === "p" || e.key === "P") && followId != null) { povMode = !povMode; refreshBar(); }
+  });
+  const ray = new THREE.Raycaster(), ndc = new THREE.Vector2();
+  let down = null;
+  renderer.domElement.addEventListener("pointerdown", (e) => (down = [e.clientX, e.clientY]));
+  renderer.domElement.addEventListener("pointerup", (e) => {
+    if (!down || Math.hypot(e.clientX - down[0], e.clientY - down[1]) > 6) return;  // a drag
+    const r = renderer.domElement.getBoundingClientRect();
+    ndc.set(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
+    ray.setFromCamera(ndc, camera);
+    const visible = players.filter((q) => q.root.visible);
+    const hit = ray.intersectObjects(visible.map((q) => q.root), true)[0];
+    if (hit) {
+      let o = hit.object;
+      while (o && !visible.some((q) => q.root === o)) o = o.parent;
+      const pl = visible.find((q) => q.root === o);
+      if (pl) follow(pl.p.id);
+    } else {
+      // generous click: the nearest player on screen within ~40 px
+      let best = null, bd = 40;
+      for (const q of visible) {
+        const v = q.root.position.clone().setY(1.2).project(camera);
+        const d = Math.hypot((v.x - ndc.x) * r.width / 2, (v.y - ndc.y) * r.height / 2);
+        if (d < bd) { bd = d; best = q; }
+      }
+      if (best) follow(best.p.id);
+    }
+  });
+  refreshBar();
+  // test hook: screen position of the visible player nearest the screen centre
+  window.__pickable = () => {
+    const r = renderer.domElement.getBoundingClientRect();
+    let best = null, bd = Infinity;
+    for (const q of players) {
+      if (!q.root.visible) continue;
+      const v = q.root.position.clone().setY(1.0).project(camera);
+      if (Math.abs(v.x) > 0.9 || Math.abs(v.y) > 0.9) continue;
+      const d = Math.hypot(v.x, v.y);
+      if (d < bd) { bd = d; best = { id: q.p.id, x: r.left + (v.x + 1) / 2 * r.width, y: r.top + (1 - v.y) / 2 * r.height }; }
+    }
+    return best;
+  };
+
   const video = document.getElementById("broadcast");
   video.src = `${RUN}/${scene_.video}`;
   const seek = document.getElementById("seek"), play = document.getElementById("play");
