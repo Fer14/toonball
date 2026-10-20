@@ -2,6 +2,12 @@
 
 ## Known issues to follow up (noted 2026-10-20)
 
+- [ ] **Other broadcasts look far off** (Kaggle highlight reels from other leagues):
+  calibration, kit colours and shot selection. Tracked in
+  [#9](https://github.com/Fer14/toonball/issues/9).
+- [ ] **3D pose exaggerates crouches**: in 573e61_0 the keeper briefly lies flat after his
+  catch, while the real keeper is crouched low (see #9).
+
 Measured with the motion diagnostics after the calibration / goalkeeper / ball rewrite.
 
 - [ ] **No ball height on the Kaggle video** (`clips/kaggle_106.mp4`). Its frames don't fit a

@@ -50,7 +50,8 @@ await page.waitForFunction(() => window.__ready === true, null, { timeout: 12000
 const n = Math.min(await page.evaluate(() => window.__N), Number(process.env.MAX_FRAMES || Infinity));
 const fps = await page.evaluate(() => window.__fps);
 
-const outMp4 = path.join(runDir, `${layout}_${theme}.mp4`);
+// TAG names a variant (e.g. TAG=pov) so it doesn't overwrite the plain recording
+const outMp4 = path.join(runDir, `${layout}_${theme}${process.env.TAG ? "_" + process.env.TAG : ""}.mp4`);
 const ff = spawn("ffmpeg", ["-v", "error", "-y", "-f", "image2pipe", "-framerate", String(fps),
   "-c:v", "mjpeg", "-i", "-", "-c:v", "libx264", "-preset", "medium", "-crf", "18",
   "-pix_fmt", "yuv420p", outMp4], { stdio: ["pipe", "inherit", "inherit"] });

@@ -1141,14 +1141,11 @@ function update(f) {
     if (povMode) {
       // eyes: front of the head, looking where the head points (a little down, at the play)
       const eye = fp.head.localToWorld(new THREE.Vector3(0, 0.05, 0.3));
-      const look = fp.head.localToWorld(new THREE.Vector3(0, -0.6, 10));
+      const look = fp.head.localToWorld(new THREE.Vector3(0, -0.25, 10));
       fp.head.visible = false;
       camPos.copy(eye);
       camTarget.copy(look);
       fov = 70;
-    } else if (FOCUS != null && followId === FOCUS && RECORD) {
-      camTarget.copy(fp.root.position).setY(1.1);      // fixed close-up (deterministic)
-      camPos.copy(camTarget).add(new THREE.Vector3(0, 2.5, 9));
     } else {
       const yaw = fp.root.rotation.y, back = new THREE.Vector3(-Math.sin(yaw), 0, -Math.cos(yaw));
       camTarget.copy(fp.root.position).setY(1.2);
@@ -1157,7 +1154,8 @@ function update(f) {
     }
   }
   if (camera.fov !== fov) { camera.fov = fov; camera.updateProjectionMatrix(); }
-  if (!RECORD && fp && fp.root.visible) {  // ease the follow cameras (players turn quickly)
+  if (fp && fp.root.visible) {  // ease the follow cameras (players turn quickly); recordings
+                                // step frames in order, so this stays deterministic there too
     const k = povMode ? 0.35 : 0.12;
     smoothPos.lerp(camPos, smoothInit ? k : 1);
     smoothTarget.lerp(camTarget, smoothInit ? k : 1);
