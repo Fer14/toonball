@@ -511,8 +511,8 @@ const players = scene_.players.map(makePlayer);
 
 // ball + blob shadow
 const ballMesh = new THREE.Mesh(
-  // a real ball (r = 0.11 m) scaled like the players, a touch bigger so it stays readable
-  new THREE.SphereGeometry(0.11 * SCALE * (THEME === "toy" ? 1.6 : 1.25), 24, 16),
+  // twice a real ball (r = 0.11 m) at player scale, so it reads well from the broadcast camera
+  new THREE.SphereGeometry(0.22 * SCALE * (THEME === "toy" ? 1.3 : 1.0), 24, 16),
   new THREE.MeshStandardMaterial({
     roughness: 0.35,
     map: canvasTex(256, 128, (g, w, h) => {
@@ -527,7 +527,7 @@ const ballMesh = new THREE.Mesh(
 ballMesh.castShadow = true;
 scene.add(ballMesh);
 // blob shadow straight below the ball: makes its height readable when it is in the air
-const ballBlob = new THREE.Mesh(new THREE.CircleGeometry(0.22, 24),
+const ballBlob = new THREE.Mesh(new THREE.CircleGeometry(0.35, 24),
   new THREE.MeshBasicMaterial({ color: 0x000000, transparent: true, opacity: 0.35, depthWrite: false }));
 ballBlob.rotation.x = -Math.PI / 2;
 scene.add(ballBlob);
