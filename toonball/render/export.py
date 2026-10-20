@@ -43,6 +43,7 @@ def export(world: World, out: Path, video: str) -> Path:
                 **({"colour": t.colour} if t.colour else {}),
                 **({"pose": {k: _r(v) for k, v in t.pose.items()}} if t.pose else {}),
                 **({"pose3d": _pose3d(t.pose3d)} if t.pose3d else {}),
+                **({"seen": t.seen.astype(int).tolist()} if t.seen is not None else {}),
             }
             for t in world.tracks
         ],

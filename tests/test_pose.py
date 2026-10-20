@@ -23,6 +23,16 @@ def test_gait_phase_without_pose_follows_speed():
     assert np.allclose(np.diff(phi), rate)
 
 
+def test_coco_to_h36m_layout():
+    from toonball.pose.lift import coco_to_h36m
+
+    xy = np.random.default_rng(0).normal(size=(5, 17, 2)).astype(np.float32)
+    h = coco_to_h36m(xy, np.ones((5, 17), np.float32))
+    assert h.shape == (5, 17, 3)
+    assert np.allclose(h[:, 0, :2], xy[:, [11, 12]].mean(1))       # pelvis = mid-hips
+    assert np.allclose(h[:, 4, :2], xy[:, 11]) and np.allclose(h[:, 1, :2], xy[:, 12])
+
+
 def test_videopose_model_shapes():
     import torch
 
