@@ -9,6 +9,10 @@ const RUN = P.get("run") || "/runs/08fd33_0";
 const THEME = P.get("theme") || "wii";
 const LAYOUT = P.get("layout") || "pip";
 const RECORD = P.has("record");
+const USE_POSE = P.get("pose") !== "0";     // ?pose=0 → procedural animation only
+const FOCUS = P.has("focus") ? Number(P.get("focus")) : null;
+let followId = FOCUS;                       // player the camera follows (click one, or ?focus=)
+let povMode = P.get("pov") === "1";         // see through his eyes (?pov=1 or the POV button)
 document.body.classList.add(THEME, LAYOUT, ...(RECORD ? ["record"] : []));
 
 const L = 105, W = 68;                     // pitch metres
@@ -53,8 +57,29 @@ const cam = {
   y: smooth(camY.map((v, i) => lerp(v, ballY[i], 0.6)), Math.round(FPS * 1.5)),
   w: smooth(fillNulls(scene_.camera.w), Math.round(FPS * 2)),
 };
-const kicksAt = new Map();                  // player id -> [frames]
-for (const [f, id] of scene_.kicks) (kicksAt.get(id) ?? kicksAt.set(id, []).get(id)).push(f);
+// ball touches: every release (the frame the ball leaves a player) becomes a body action —
+// kick, header, throw-in or keeper throw — timed so the contact happens on that frame
+const touchesAt = new Map();                // player id -> [{ f, type, leg, at }]
+const onPitch = (x, y) => x > 0.3 && x < L - 0.3 && y > 0.3 && y < W - 0.3;
+for (const [f, id] of scene_.kicks) {
+  const p = scene_.players.find((q) => q.id === id);
+  if (!p) continue;
+  const z = (g) => ball.z[clamp(g, 0, N - 1)] ?? 0;
+  const i = clamp(f - p.start, 0, p.x.length - 1);
+  let type = "kick";
+  if (ball.hands?.[f - 1]) {
+    const g = Math.min(N - 1, f + Math.round(FPS));
+    const dist = Math.hypot((ball.x[g] ?? ball.x[f]) - ball.x[f], (ball.y[g] ?? ball.y[f]) - ball.y[f]);
+    type = dist > 25 ? "kick" : "throw";            // keeper: punt long, throw short
+  } else if (!onPitch(p.x[i], p.y[i])) {
+    type = "throw";                                 // throw-in
+  } else if (Math.max(z(f - 1), z(f), z(f + 1)) > 1.3 && Math.max(z(f - 1), z(f), z(f + 1)) < 2.8) {
+    type = "header";                                // ball at head height
+  }
+  (touchesAt.get(id) ?? touchesAt.set(id, []).get(id)).push({ f, type, leg: 1, at: null });
+}
+// timing of each action around its contact frame (seconds before / after)
+const ACTION = { kick: [0.25, 0.3], header: [0.3, 0.3], throw: [0.45, 0.3] };
 
 // ball speed per frame (m/s), used for goalkeeper dives
 const ballSpeed = new Float32Array(N);
@@ -81,8 +106,9 @@ for (const p of scene_.players) {
     d = Math.atan2(Math.sin(d), Math.cos(d));
     h += d * (i === 0 ? 1 : 0.15);
     hd[i] = h;
-    // one gait cycle covers ~1.2 m walking up to ~2.7 m sprinting (1.2 Hz → 3 Hz cadence)
-    phase += (2 * Math.PI * sp) / FPS / (0.9 + 0.22 * sp);
+    // one gait cycle (two steps) covers ~1.8 m walking up to ~4.4 m sprinting, i.e. about
+    // 3 footsteps/s when jogging (same formula as toonball/pose/angles.stride_length)
+    phase += (2 * Math.PI * sp) / FPS / (1.2 + 0.4 * sp);
     ph[i] = phase;
   }
   p.heading = hd; p.phase = ph;
@@ -104,6 +130,44 @@ for (const p of scene_.players) {
     }
   }
 }
+
+// how dangerous the moment is: ball near a goal and moving fast → the crowd gets up
+const GOAL_HALF = 7.32 / 2;
+const goals = [];                           // { f, team } — team that scored
+const excitement = new Float32Array(N);
+{
+  // which goal each team defends: from its keeper's average position
+  const defendsLeft = {};
+  for (const team of [0, 1]) {
+    const gk = scene_.players.find((p) => p.role === "goalkeeper" && p.team === team);
+    const mx = gk ? gk.x.reduce((a, b) => a + b, 0) / gk.x.length : (team ? L * 0.75 : L * 0.25);
+    defendsLeft[team] = mx < L / 2;
+  }
+  const forced = P.has("goal") ? Number(P.get("goal")) : null;   // ?goal=<frame>: preview
+  for (let f = 1; f < N; f++) {
+    const x = ball.x[f], y = ball.y[f], z = ball.z[f] ?? 0;
+    const inGoal = x != null && (x < 0.3 || x > L - 0.3) && Math.abs(y - W / 2) < GOAL_HALF && z < 2.44;
+    if ((inGoal || f === forced) && (!goals.length || f - goals[goals.length - 1].f > 10 * FPS)) {
+      const leftGoal = x != null ? x < L / 2 : true;
+      goals.push({ f, team: defendsLeft[0] === leftGoal ? 1 : 0 });
+    }
+    if (x == null) continue;
+    const d = Math.min(Math.hypot(x, y - W / 2), Math.hypot(L - x, y - W / 2));
+    const sp = Math.hypot(x - (ball.x[f - 1] ?? x), y - (ball.y[f - 1] ?? y)) * FPS;
+    excitement[f] = clamp((35 - d) / 25, 0, 1) * (0.4 + 0.6 * clamp(sp / 12, 0, 1));
+  }
+  for (const g of goals) for (let f = g.f; f < Math.min(N, g.f + 6 * FPS); f++) excitement[f] = 1;
+  // rise and calm down over ~1 s (forward + backward smoothing keeps it deterministic)
+  for (const dir of [1, -1]) {
+    let v = 0;
+    for (let k = 0; k < N; k++) {
+      const f = dir > 0 ? k : N - 1 - k;
+      v += (excitement[f] - v) * (excitement[f] > v ? 0.15 : 0.04);
+      excitement[f] = Math.max(excitement[f] * 0.5, v);
+    }
+  }
+}
+const goalAt = (f) => goals.find((g) => f >= g.f && f < g.f + 4 * FPS) ?? null;
 
 // ─────────────────────────── renderer ───────────────────────────
 const stage = document.getElementById("stage");
@@ -272,6 +336,48 @@ function adBoards(len, z, colours) {
   return m;
 }
 
+// ── crowd: instanced fans in both teams' colours; idle sway, on their feet when it gets
+// dangerous near a goal, jumping for goals ───────────────────────────────────────────────
+const FANS = [];
+let crowd = null;
+
+function buildCrowd() {
+  const r = rng(42), n = FANS.length;
+  const body = new THREE.InstancedMesh(new THREE.CapsuleGeometry(0.3, 0.45, 3, 8),
+                                       new THREE.MeshStandardMaterial({ roughness: 0.8 }), n);
+  const head = new THREE.InstancedMesh(new THREE.SphereGeometry(0.24, 10, 8),
+                                       new THREE.MeshStandardMaterial({ roughness: 0.7 }), n);
+  const kit = [scene_.teams[0], scene_.teams[1]].map((c) => new THREE.Color(c ?? "#ffffff"));
+  const other = ["#ffffff", "#1d2433", "#f1c40f", "#e74c3c"].map((c) => new THREE.Color(c));
+  const phase = new Float32Array(n), rate = new Float32Array(n);
+  for (let k = 0; k < n; k++) {
+    const u = r();
+    body.setColorAt(k, u < 0.45 ? kit[0] : u < 0.9 ? kit[1] : other[Math.floor(r() * other.length)]);
+    head.setColorAt(k, new THREE.Color(SKIN[Math.floor(r() * SKIN.length)]));
+    phase[k] = r() * Math.PI * 2;
+    rate[k] = 0.6 + r() * 0.8;
+  }
+  scene.add(body, head);
+  crowd = { body, head, phase, rate };
+}
+
+const _m = new THREE.Matrix4();
+function updateCrowd(f) {
+  if (!crowd) return;
+  const t = f / FPS, e = excitement[clamp(Math.round(f), 0, N - 1)];
+  for (let k = 0; k < FANS.length; k++) {
+    const p = FANS[k], ph = crowd.phase[k];
+    const sway = Math.sin(t * crowd.rate[k] * 2 + ph) * 0.04;
+    const jump = e * Math.max(0, Math.sin(t * (5 + crowd.rate[k] * 3) + ph)) * 0.7;
+    const y = p.y + 0.55 + sway + jump;
+    _m.makeTranslation(p.x, y, p.z);
+    crowd.body.setMatrixAt(k, _m);
+    _m.makeTranslation(p.x, y + 0.6, p.z);
+    crowd.head.setMatrixAt(k, _m);
+  }
+  crowd.body.instanceMatrix.needsUpdate = crowd.head.instanceMatrix.needsUpdate = true;
+}
+
 function buildStadium() {
   scene.background = canvasTex(4, 512, (g, w, h) => {
     const gr = g.createLinearGradient(0, 0, 0, h);
@@ -303,7 +409,17 @@ function buildStadium() {
     g.position.set(s.pos[0], 0, s.pos[1]);
     g.rotation.y = s.rot;
     scene.add(g);
+    g.updateMatrixWorld(true);
+    for (let t = 0; t < 4; t++) {               // two rows of fans standing on each tier
+      for (const dz of [1.3, -1.1]) {
+        for (let x = -s.len / 2 + 0.6; x < s.len / 2 - 0.6; x += 0.85) {
+          FANS.push(g.localToWorld(new THREE.Vector3(x + (Math.random() - 0.5) * 0.2, 3 + t * 3,
+                                                     -t * 5 + dz)));
+        }
+      }
+    }
   }
+  buildCrowd();
   scene.add(adBoards(L + 10, W / 2 + 5, ["#2b8cff", "#e5293b", "#1d2433"]));
   const track = new THREE.Mesh(new THREE.PlaneGeometry(L + 40, 14),
                                new THREE.MeshStandardMaterial({ color: 0x3f8f45, roughness: 1 }));
@@ -461,29 +577,45 @@ function makePlayer(p) {
     parent.add(m);
     return m;
   };
-  const legs = [], arms = [];
+  // skeleton: body → pelvis → (hips → knees) and chest → (shoulders → elbows, head);
+  // two-segment limbs so a 3D pose can drive every bone
+  const pelvis = new THREE.Group(); pelvis.position.set(0, 0.9, 0); body.add(pelvis);
+  const chest = new THREE.Group(); chest.position.set(0, 0.02, 0); pelvis.add(chest);
+  const legs = [], knees = [], arms = [], elbows = [];
   for (const sx of [-1, 1]) {
-    const hip = new THREE.Group(); hip.position.set(0.14 * sx, 0.88, 0); body.add(hip);
-    add(hip, new THREE.CapsuleGeometry(0.1, 0.32, 4, 10), skin, 0, -0.22, 0);
-    add(hip, new THREE.CylinderGeometry(0.11, 0.1, 0.32, 10), sockM, 0, -0.55, 0);
-    add(hip, new THREE.BoxGeometry(0.16, 0.1, 0.3), bootM, 0, -0.78, 0.06);
-    legs.push(hip);
-    const sh = new THREE.Group(); sh.position.set(0.34 * sx, 1.42, 0); body.add(sh);
+    const hip = new THREE.Group(); hip.position.set(0.14 * sx, -0.02, 0); pelvis.add(hip);
+    add(hip, new THREE.CapsuleGeometry(0.1, 0.2, 4, 10), skin, 0, -0.2, 0);
+    const knee = new THREE.Group(); knee.position.set(0, -0.4, 0); hip.add(knee);
+    add(knee, new THREE.SphereGeometry(0.1, 10, 8), skin, 0, 0, 0);
+    add(knee, new THREE.CylinderGeometry(0.105, 0.095, 0.3, 10), sockM, 0, -0.16, 0);
+    add(knee, new THREE.BoxGeometry(0.16, 0.1, 0.3), bootM, 0, -0.36, 0.06);
+    legs.push(hip); knees.push(knee);
+    const sh = new THREE.Group(); sh.position.set(0.34 * sx, 0.5, 0); chest.add(sh);
     add(sh, new THREE.SphereGeometry(0.12, 12, 10), shirtM, 0, 0, 0);
-    add(sh, new THREE.CapsuleGeometry(0.075, 0.32, 4, 10), skin, 0, -0.27, 0);
-    if (role === "goalkeeper") add(sh, new THREE.SphereGeometry(0.11, 12, 10), M("#f2f2f2"), 0, -0.5, 0);
+    add(sh, new THREE.CapsuleGeometry(0.075, 0.13, 4, 10), skin, 0, -0.14, 0);
+    const elbow = new THREE.Group(); elbow.position.set(0, -0.28, 0); sh.add(elbow);
+    add(elbow, new THREE.CapsuleGeometry(0.07, 0.12, 4, 10), skin, 0, -0.12, 0);
+    if (role === "goalkeeper") add(elbow, new THREE.SphereGeometry(0.11, 12, 10), M("#8fe03a"), 0, -0.24, 0);
     sh.rotation.z = 0.12 * sx;
-    arms.push(sh);
+    arms.push(sh); elbows.push(elbow);
   }
-  add(body, new THREE.CylinderGeometry(0.28, 0.26, 0.26, 16), shortsM, 0, 0.92, 0);
-  add(body, new THREE.CapsuleGeometry(0.28, 0.3, 6, 16), shirtM, 0, 1.25, 0);
-  const head = new THREE.Group(); head.position.set(0, 1.92, 0); body.add(head);
+  add(pelvis, new THREE.CylinderGeometry(0.28, 0.26, 0.26, 16), shortsM, 0, 0.02, 0);
+  add(chest, new THREE.CapsuleGeometry(0.28, 0.3, 6, 16), shirtM, 0, 0.33, 0);
+  const head = new THREE.Group(); head.position.set(0, 1.0, 0); chest.add(head);
   add(head, new THREE.SphereGeometry(0.33, 24, 18), skin, 0, 0, 0);
   add(head, new THREE.SphereGeometry(0.345, 24, 12, 0, Math.PI * 2, 0, Math.PI * 0.45),
       hairM, 0, 0.02, -0.03);
   for (const sx of [-1, 1]) add(head, new THREE.SphereGeometry(0.045, 10, 8), eyeM, 0.11 * sx, 0.04, 0.3);
   if (role === "referee") {
-    add(body, new THREE.BoxGeometry(0.58, 0.08, 0.5), M("#ffd400"), 0, 1.45, 0);
+    add(chest, new THREE.BoxGeometry(0.58, 0.08, 0.5), M("#ffd400"), 0, 0.53, 0);
+  }
+  if (shirtNumber.has(p.id)) {                // number on the back of the shirt
+    const num = new THREE.Mesh(new THREE.PlaneGeometry(0.36, 0.36),
+                               M("#ffffff", { map: numberTexture(shirtNumber.get(p.id), shirt) }));
+    num.material.alphaTest = 0.5;
+    num.position.set(0, 0.36, -0.3);
+    num.rotation.y = Math.PI;
+    chest.add(num);
   }
   let base = null;
   if (toy) {                                  // table-football style base
@@ -492,13 +624,49 @@ function makePlayer(p) {
   }
   root.scale.setScalar(SCALE);
   scene.add(root);
-  return { p, root, body, legs, arms, head, base, mats, kicks: kicksAt.get(p.id) ?? [] };
+  return { p, root, body, pelvis, chest, legs, knees, arms, elbows, head, base, mats,
+           touches: touchesAt.get(p.id) ?? [] };
+}
+
+// shirt numbers by position (reading the real numbers needs a jersey-OCR model, see FUTURE.md):
+// keeper 1; defenders 2–5, midfield 6, 7, 8, 11, forwards 9, 10 — ordered across the pitch
+const shirtNumber = new Map();
+for (const team of [0, 1]) {
+  const ps = scene_.players.filter((p) => p.team === team);
+  const gk = ps.find((p) => p.role === "goalkeeper");
+  if (gk) shirtNumber.set(gk.id, 1);
+  const mean = (a) => a.reduce((s, v) => s + v, 0) / a.length;
+  const left = gk ? mean(gk.x) < L / 2 : team === 0;
+  const out = ps.filter((p) => p.role === "player")
+    .map((p) => ({ id: p.id, depth: left ? mean(p.x) : L - mean(p.x), across: mean(p.y) }))
+    .sort((a, b) => a.depth - b.depth);
+  const lines = [[2, 4, 5, 3], [7, 6, 8, 11], [9, 10]];
+  let k = 0;
+  for (const line of lines) {
+    const group = out.slice(k, k + line.length).sort((a, b) => a.across - b.across);
+    group.forEach((p, j) => shirtNumber.set(p.id, line[j]));
+    k += line.length;
+  }
+  out.slice(k).forEach((p, j) => shirtNumber.set(p.id, 12 + j));
+}
+
+function numberTexture(n, shirt) {
+  const light = new THREE.Color(shirt).getHSL({}).l > 0.6;
+  return canvasTex(128, 128, (g) => {
+    g.font = "bold 92px Trebuchet MS, sans-serif";
+    g.textAlign = "center"; g.textBaseline = "middle";
+    g.lineWidth = 8; g.strokeStyle = light ? "#ffffff" : "#1d2433";
+    g.strokeText(String(n), 64, 70);
+    g.fillStyle = light ? "#1d2433" : "#ffffff";
+    g.fillText(String(n), 64, 70);
+  });
 }
 
 const players = scene_.players.map(makePlayer);
 
 // ball + blob shadow
 const ballMesh = new THREE.Mesh(
+  // twice a real ball (r = 0.11 m) at player scale, so it reads well from the broadcast camera
   new THREE.SphereGeometry(0.22 * SCALE * (THEME === "toy" ? 1.3 : 1.0), 24, 16),
   new THREE.MeshStandardMaterial({
     roughness: 0.35,
@@ -546,32 +714,310 @@ function updatePlayer(pl, f) {
   // fade in / out when someone enters or leaves the camera view
   for (const m of pl.mats) { m.opacity = alpha; m.depthWrite = alpha > 0.99; }
 
-  const speed = sample(p.s, i) ?? 0, ph = sample(p.phase, i);
+  // pose from the video (toonball/pose): gait timing + stride size, knee / elbow bend, lean,
+  // sideways tilt — blended with the procedural cycle by how reliable the pose is
+  const pose = USE_POSE ? p.pose : null;
+  const pw = pose ? clamp(sample(pose.w, i) ?? 0, 0, 1) : 0;
+  const speed = sample(p.s, i) ?? 0;
+  const ph = pose ? sample(pose.phase, i) : sample(p.phase, i);
   const amp = clamp(speed / 8, 0, 1);
   const moving = clamp((speed - 0.3) / 0.7, 0, 1);       // blend into standing still
-  const swing = Math.sin(ph) * (0.12 + 0.45 * amp) * moving;
+  // swing size from physics, timing from the video: during one step (half a gait cycle) the
+  // standing foot must sweep back as far as the body travels, so it doesn't slide
+  const phArr = pose ? pose.phase : p.phase;
+  const omega = Math.abs((sample(phArr, i + 1) ?? 0) - (sample(phArr, i - 1) ?? 0)) / 2 * FPS;
+  const legLen = (THIGH + SHIN) * SCALE * 0.95;
+  const stepLen = omega > 0.5 ? speed * Math.PI / omega : 0;          // metres per step
+  const swingAmp = Math.asin(clamp(stepLen / (2 * legLen), 0, 0.8)) * moving;
+  const swing = Math.sin(ph) * swingAmp;
+  // standing foot of the stepping cycle: leg angle (backward +) is −sx·sin(ph), so leg k
+  // stands while −sx·cos(ph) > 0 (sweeping back): k = 0 (sx = −1) when cos(ph) > 0
+  pl.stance = moving > 0.5 ? (Math.cos(ph) > 0 ? 0 : 1) : null;
   const baseY = pl.base ? 0.14 : 0;
+  const kneePose = sample(pose?.knee ?? [], i), elbowPose = sample(pose?.elbow ?? [], i);
   for (const [k, sx] of [[0, -1], [1, 1]]) {
     pl.legs[k].rotation.set(-sx * swing, 0, 0);
     pl.arms[k].rotation.set(sx * swing * 0.8, 0, 0.12 * sx);
+    // leg angle (backward +) is −sx·sin(ph): the knee folds while the leg swings forward
+    // through the air (angle decreasing), and stays nearly straight while it stands and
+    // sweeps back; elbows stay bent more when running fast
+    const kProc = 0.08 + (0.25 + 1.1 * amp) * moving * Math.max(0, sx * Math.cos(ph));
+    pl.knees[k].rotation.set(kneePose == null ? kProc : kProc + pw * (kneePose - 0.08 - 0.3 * amp * moving), 0, 0);
+    const eProc = 0.25 + 0.9 * amp * moving;
+    pl.elbows[k].rotation.set(-(elbowPose == null ? eProc : lerp(eProc, elbowPose, pw)), 0, 0);
   }
-  pl.body.rotation.set(0.1 * amp, 0, 0);
-  pl.body.position.y = baseY + Math.abs(Math.cos(ph)) * 0.05 * amp;
+  const leanPose = sample(pose?.lean ?? [], i);
+  pl.body.rotation.set(leanPose == null ? 0.1 * amp : lerp(0.1 * amp, clamp(leanPose, -0.3, 0.5), pw), 0, 0);
+  const rollPose = sample(pose?.roll ?? [], i), rw = pose ? clamp(sample(pose.wr, i) ?? 0, 0, 1) : 0;
+  if (rollPose != null) pl.body.rotation.z = -clamp(rollPose, -0.3, 0.3) * rw * 0.8;
+  // runners lower their hips (more leg reach for each stance): the planted foot can hold
+  pl.body.position.y = baseY + Math.abs(Math.cos(ph)) * 0.05 * amp - 0.14 * amp * moving;
   pl.root.position.y = THEME === "toy" ? Math.abs(Math.sin(ph)) * 0.18 * amp : 0;
   pl.head.rotation.y = Math.sin(f * 0.05 + p.id) * 0.15;
 
-  if (p.role === "goalkeeper") animateKeeper(pl, f, i, speed, ph, baseY);
+  // full-body 3D pose from the video replaces the scripted moves where it is reliable
+  const w3 = pose3dWeight(p, i);
+  if (p.role === "goalkeeper" && w3 < 0.5) animateKeeper(pl, f, i, speed, ph, baseY);
 
-  for (const kf of pl.kicks) {                // kick: right leg winds back then strikes
-    const k = (f - kf) / (0.35 * FPS);
-    if (k >= -0.4 && k <= 1) {
-      const a = k < 0 ? -1.1 * (k + 0.4) / 0.4 : lerp(-1.1, 1.3, Math.sin(k * Math.PI / 2));
-      pl.legs[1].rotation.x = -a;
-      pl.arms[0].rotation.x = 0.7;
-      pl.arms[1].rotation.x = -0.5;
-      pl.body.rotation.x = -0.15;
+  pl.action = null;
+  pl.actionLeg = -1;
+  for (const t of pl.touches) {               // body action, contact exactly on the release
+    const [pre, post] = ACTION[t.type];
+    const u = (f - t.f) / FPS;                 // seconds from contact
+    if (u < -pre || u > post) continue;
+    const k = u < 0 ? u / pre : u / post;      // −1 … 0 (contact) … 1
+    pl.action = t.type;
+    if (t.type === "kick") {                   // wind back, strike through the ball, follow
+      // leg angle: backward + (wound up at −1), vertical at the contact, forward after
+      pl.legs[t.leg].rotation.set(k < 0 ? -1.1 * k : -1.3 * Math.sin(k * Math.PI / 2), 0, 0);
+      pl.actionLeg = t.leg;
+      pl.knees[t.leg].rotation.set(k < 0 ? 1.0 * -k : 0.1, 0, 0);
+      pl.arms[1 - t.leg].rotation.x = -0.7;
+      pl.arms[t.leg].rotation.x = 0.4;
+      pl.body.rotation.x = -0.12;
+    } else if (t.type === "header") {          // lean back, spring up, nod into the ball
+      const up = Math.max(0, Math.cos(k * Math.PI / 2));
+      pl.body.position.y += 0.22 * up;
+      pl.body.rotation.x = k < 0 ? 0.3 * k : 0.35 * Math.sin(Math.min(k * 2, 1) * Math.PI / 2);
+      pl.head.rotation.x = k < 0 ? 0.35 * k : 0.45 * (1 - k);
+      for (const arm of pl.arms) arm.rotation.x = -0.9 * up;
+    } else {                                   // throw: ball overhead with both hands
+      const back = k < 0 ? -2.9 - 0.3 * (1 + k) : lerp(-2.9, -1.2, Math.min(1, k * 1.5));
+      for (const [m, sx] of [[0, -1], [1, 1]]) {
+        pl.arms[m].rotation.set(back, 0, 0.12 * sx);
+        pl.elbows[m].rotation.x = k < 0 ? -0.9 : -0.2;
+      }
+      pl.body.rotation.x = k < 0 ? -0.25 : 0.25 * k;
     }
   }
+  if (w3 > 0) applyPose3d(pl, i, w3, baseY);
+  if (pl.plant && !BUILDING_PLANTS) plantFeet(pl, f);
+  const goal = goalAt(f);                     // the scoring team celebrates: jumps, arms up
+  if (goal && p.team === goal.team) {
+    const hop = Math.abs(Math.sin((f - goal.f) * 0.35 + p.id));
+    pl.body.position.y += 0.35 * hop;
+    for (const [k, sx] of [[0, -1], [1, 1]]) {
+      pl.arms[k].rotation.set(-2.7 + 0.3 * hop, 0, 0.35 * sx);
+      pl.elbows[k].rotation.set(-0.2, 0, 0);
+    }
+  }
+}
+
+// ── 3D pose retargeting (joints from toonball/pose/lift.py, H36M order, cm, pitch x / y / z-up)
+const UP = new THREE.Vector3(0, 1, 0), DOWN = new THREE.Vector3(0, -1, 0);
+const IDENT = new THREE.Quaternion();
+const H36M = { pelvis: 0, rHip: 1, rKnee: 2, rFoot: 3, lHip: 4, lKnee: 5, lFoot: 6, thorax: 8,
+               head: 10, lSh: 11, lEl: 12, lWr: 13, rSh: 14, rEl: 15, rWr: 16 };
+
+function pose3dWeight(p, i) {
+  if (!USE_POSE || !p.pose3d) return 0;
+  const j = p.pose3d.j, k = Math.round(i);
+  if (k < 0 || k >= j.length || !j[k]) return 0;
+  return clamp(((p.pose3d.c[k] ?? 0) - 0.45) / 0.25, 0, 1);
+}
+
+function jointsAt(p, i) {                     // interpolated joints in three.js axes, metres
+  const J = p.pose3d.j, a0 = Math.floor(i), t = i - a0;
+  let A = J[clamp(a0, 0, J.length - 1)], B = J[clamp(a0 + 1, 0, J.length - 1)];
+  if (!A) A = B;
+  if (!B) B = A;
+  if (!A) return null;
+  const out = [];
+  for (let k = 0; k < 17; k++) {
+    const v = (c) => lerp(A[3 * k + c], B[3 * k + c], t) / 100;
+    out.push(new THREE.Vector3(v(0), v(2), v(1)));  // pitch (x, y, z-up) → three (x, up, z)
+  }
+  return out;
+}
+
+// rotate `bone` (rest direction `rest` in its parent's frame) so it points along `target`
+// (root-local frame); returns the bone's orientation in the root-local frame
+function aim(bone, parentQ, rest, target, w) {
+  const local = target.clone().applyQuaternion(parentQ.clone().invert());
+  bone.quaternion.slerp(new THREE.Quaternion().setFromUnitVectors(rest, local.normalize()), w);
+  return parentQ.clone().multiply(bone.quaternion);
+}
+
+function applyPose3d(pl, i, w, baseY) {
+  const J = jointsAt(pl.p, i);
+  if (!J) return;
+  // facing from the body itself: hips and shoulders give the person's left
+  const left = J[H36M.lHip].clone().sub(J[H36M.rHip])
+    .add(J[H36M.lSh].clone().sub(J[H36M.rSh]).multiplyScalar(0.5));
+  left.y = 0;
+  if (left.lengthSq() < 1e-6) return;
+  const fwd = new THREE.Vector3().crossVectors(left.normalize(), UP);
+  const yaw = Math.atan2(fwd.x, fwd.z), cur = pl.root.rotation.y;
+  // moving: hips and legs face the way the player goes (or the feet slide), the torso twists
+  // towards where the pose says he is facing; standing: the whole body turns with the pose
+  const speed = sample(pl.p.s, i) ?? 0;
+  const standing = clamp((0.9 - speed) / 0.4, 0, 1);
+  const twist = Math.atan2(Math.sin(yaw - cur), Math.cos(yaw - cur));
+  pl.root.rotation.y = cur + twist * w * standing;
+  const torsoTwist = clamp(twist * (1 - standing), -1.2, 1.2) * w;
+
+  const toLocal = new THREE.Quaternion().setFromAxisAngle(UP, -pl.root.rotation.y);
+  const L = J.map((v) => v.applyQuaternion(toLocal));
+  const dir = (a, b) => L[b].clone().sub(L[a]);
+
+  pl.body.quaternion.slerp(IDENT, w);
+  pl.pelvis.quaternion.slerp(IDENT, w);
+  const qP = pl.body.quaternion.clone().multiply(pl.pelvis.quaternion);
+  let qC = aim(pl.chest, qP, UP, dir(H36M.pelvis, H36M.thorax), w);
+  if (torsoTwist) {
+    pl.chest.quaternion.multiply(new THREE.Quaternion().setFromAxisAngle(UP, torsoTwist));
+    qC = qP.clone().multiply(pl.chest.quaternion);
+  }
+  aim(pl.head, qC, UP, dir(H36M.thorax, H36M.head), w);
+  const sides = [  // rig index 0 = person's right (−x), 1 = left (+x)
+    { sh: H36M.rSh, el: H36M.rEl, wr: H36M.rWr, hip: H36M.rHip, kn: H36M.rKnee, ft: H36M.rFoot },
+    { sh: H36M.lSh, el: H36M.lEl, wr: H36M.lWr, hip: H36M.lHip, kn: H36M.lKnee, ft: H36M.lFoot },
+  ];
+  // legs: the lifted pose doesn't step cleanly, so whenever the player moves the stepping cycle
+  // (locked to the real footsteps) drives them and the standing foot is planted; the pose
+  // takes the legs when the player stands, and for leg actions it shows (a kick: foot well in
+  // front of the body and off the grass)
+  const kickLike = [H36M.rFoot, H36M.lFoot].some((ft) =>
+    L[ft].z - L[H36M.pelvis].z > 0.45 && L[ft].y - Math.min(L[H36M.rFoot].y, L[H36M.lFoot].y) > 0.25);
+  const wl = pl.action && !kickLike ? 0
+    : w * Math.max(clamp((0.9 - speed) / 0.4, 0, 1), kickLike ? 1 : 0);
+  if (wl > 0.5) pl.stance = null;               // pose-driven legs: standing foot = lower one
+  const wa = pl.action === "header" || pl.action === "throw" ? 0 : w;  // arms busy
+  sides.forEach((s, k) => {
+    const qS = aim(pl.arms[k], qC, DOWN, dir(s.sh, s.el), wa);
+    aim(pl.elbows[k], qS, DOWN, dir(s.el, s.wr), wa);
+    if (wl > 0) {
+      const qH = aim(pl.legs[k], qP, DOWN, dir(s.hip, s.kn), wl);
+      aim(pl.knees[k], qH, DOWN, dir(s.kn, s.ft), wl);
+    }
+  });
+  // keep the lower foot on the grass: crouches lower the body (avatar legs ≈ 0.94 × human)
+  const footLow = Math.min(L[H36M.rFoot].y, L[H36M.lFoot].y);
+  pl.body.position.y = lerp(pl.body.position.y, baseY + Math.max(0.3, -footLow * 0.94) - 0.86, wl);
+}
+
+// ── foot planting: a foot that lands stays where it landed (no sliding) ──────────────────
+// A pre-pass poses every player in every frame and records where each sole is. A foot is
+// planted while it is on the grass and barely moving; during a plant it is locked to the spot
+// where it landed and a two-bone IK bends hip + knee to reach it.
+const SOLE = new THREE.Vector3(0, -0.41, 0);     // sole in the knee group's frame
+const THIGH = 0.4, SHIN = 0.41;                   // rig segment lengths (before SCALE)
+let BUILDING_PLANTS = false;
+
+function soleWorld(pl, k) {
+  return pl.knees[k].localToWorld(SOLE.clone());
+}
+
+function buildPlants(margin = 0.02, minRun = 3) {
+  // standing foot = the stepping cycle's stance leg while moving, else the lower sole (with a
+  // little hysteresis so it doesn't flicker); it stays planted until the other foot takes over
+  BUILDING_PLANTS = true;
+  const Y = players.map(() => [new Float32Array(N).fill(NaN), new Float32Array(N).fill(NaN)]);
+  const ST = players.map(() => new Int8Array(N).fill(-1));
+  const X = players.map(() => [new Float32Array(N * 3), new Float32Array(N * 3)]);
+  for (let f = 0; f < N; f++) {
+    players.forEach((pl, j) => {
+      updatePlayer(pl, f);
+      if (!pl.root.visible || pose3dWeight(pl.p, f - pl.p.start) < 0.5) return;
+      pl.root.updateMatrixWorld(true);
+      for (let k = 0; k < 2; k++) {
+        const v = soleWorld(pl, k);
+        v.toArray(X[j][k], 3 * f);
+        Y[j][k][f] = v.y;
+      }
+      if (pl.stance != null) ST[j][f] = pl.stance;
+    });
+  }
+  players.forEach((pl, j) => {
+    const ground = (pl.base ? 0.14 : 0) * SCALE;
+    pl.plant = [new Int32Array(N).fill(-1), new Int32Array(N).fill(-1)];
+    pl.plantAt = [[], []];
+    let cur = -1, start = 0;
+    const close = (end) => {
+      if (cur >= 0 && end - start >= minRun) {
+        const a = X[j][cur], id = pl.plantAt[cur].length;
+        pl.plantAt[cur].push(new THREE.Vector3(a[3 * start], Math.max(ground, a[3 * start + 1]),
+                                               a[3 * start + 2]));
+        pl.plant[cur].fill(id, start, end);
+      }
+    };
+    for (let f = 0; f <= N; f++) {
+      const y0 = f < N ? Y[j][0][f] : NaN, y1 = f < N ? Y[j][1][f] : NaN;
+      if (!Number.isFinite(y0) || !Number.isFinite(y1)) { close(f); cur = -1; continue; }
+      const byCycle = ST[j][f] >= 0;
+      const lower = byCycle ? ST[j][f] : (y0 < y1 ? 0 : 1);
+      if (cur < 0) { cur = lower; start = f; continue; }
+      if (lower !== cur && (byCycle || Math.abs(y0 - y1) > margin * SCALE)) {
+        close(f); cur = lower; start = f;
+      }
+    }
+  });
+  BUILDING_PLANTS = false;
+}
+
+function plantFeet(pl, f) {
+  const fi = Math.round(f);
+  if (fi < 0 || fi >= N) return;
+  pl.root.updateMatrixWorld(true);
+  for (let k = 0; k < 2; k++) {
+    const id = pl.plant[k][fi];
+    if (id >= 0 && k !== pl.actionLeg) solveLegIK(pl, k, pl.plantAt[k][id]);
+  }
+}
+
+function solveLegIK(pl, k, T) {
+  const l1 = THIGH * SCALE, l2 = SHIN * SCALE;
+  const hip = pl.legs[k].getWorldPosition(new THREE.Vector3());
+  const knee = pl.knees[k].getWorldPosition(new THREE.Vector3());
+  const toT = T.clone().sub(hip);
+  let d = toT.length();
+  if (d > (l1 + l2) * 1.02) return;               // out of reach: stance over, foot lifts
+  d = clamp(d, Math.abs(l1 - l2) + 1e-3, l1 + l2 - 1e-3);
+  const dirT = toT.normalize();
+  // keep the knee bending the way the pose bends it
+  const pole = knee.sub(hip);
+  pole.sub(dirT.clone().multiplyScalar(pole.dot(dirT)));
+  if (pole.lengthSq() < 1e-8) pole.set(Math.sin(pl.root.rotation.y), 0, Math.cos(pl.root.rotation.y));
+  pole.normalize();
+  const a = (l1 * l1 - l2 * l2 + d * d) / (2 * d), h = Math.sqrt(Math.max(0, l1 * l1 - a * a));
+  const kneeT = hip.clone().addScaledVector(dirT, a).addScaledVector(pole, h);
+  const footT = hip.clone().addScaledVector(dirT, d);
+  const qPelvis = pl.pelvis.getWorldQuaternion(new THREE.Quaternion());
+  pl.legs[k].quaternion.setFromUnitVectors(
+    DOWN, kneeT.clone().sub(hip).normalize().applyQuaternion(qPelvis.invert()));
+  pl.legs[k].updateMatrixWorld(true);
+  const qThigh = pl.legs[k].getWorldQuaternion(new THREE.Quaternion());
+  pl.knees[k].quaternion.setFromUnitVectors(
+    DOWN, footT.sub(kneeT).normalize().applyQuaternion(qThigh.invert()));
+}
+
+// diagnostics: mean horizontal speed (m/s) of the standing sole of pose-driven players —
+// 0 means no sliding
+window.__footSlide = () => {
+  let sum = 0, n = 0;
+  const prev = new Map();
+  for (let f = 0; f < N; f++) {
+    for (const pl of players) {
+      updatePlayer(pl, f);
+      if (!pl.root.visible || pose3dWeight(pl.p, f - pl.p.start) < 0.5) { prev.delete(pl); continue; }
+      pl.root.updateMatrixWorld(true);
+      const s = [soleWorld(pl, 0), soleWorld(pl, 1)];
+      const k = pl.stance ?? (s[0].y < s[1].y ? 0 : 1);
+      const q = prev.get(pl);
+      if (q && q.k === k) { sum += Math.hypot(s[k].x - q.p.x, s[k].z - q.p.z) * FPS; n++; }
+      prev.set(pl, { k, p: s[k] });
+    }
+  }
+  return { meanLowerFootSpeed: sum / Math.max(n, 1), samples: n };
+};
+
+function handsPosition(pl) {                   // between both hands, in front of the chest
+  pl.root.updateMatrixWorld(true);
+  const a = pl.elbows[0].localToWorld(new THREE.Vector3(0, -0.26, 0));
+  const b = pl.elbows[1].localToWorld(new THREE.Vector3(0, -0.26, 0));
+  const mid = pl.chest.worldToLocal(a.add(b).multiplyScalar(0.5));
+  mid.z = Math.max(mid.z, 0.4);                  // arms at the sides: don't bury it in the body
+  return pl.chest.localToWorld(mid);
 }
 
 // goalkeeper: ready stance facing the ball, side-steps, and dives at fast shots
@@ -594,6 +1040,7 @@ function animateKeeper(pl, f, i, speed, ph, baseY) {
     }
     pl.body.rotation.set(0.28, 0, 0);
     pl.body.position.y = baseY - 0.12;
+    for (let k = 0; k < 2; k++) { pl.knees[k].rotation.x = 0.55; pl.elbows[k].rotation.x = -0.6; }
   }
   for (const d of p.dives) {
     const k = (f - d.f) / (0.85 * FPS);
@@ -610,11 +1057,19 @@ function animateKeeper(pl, f, i, speed, ph, baseY) {
 }
 
 const clockEl = document.getElementById("clock");
+const goalEl = document.getElementById("goal");
 document.getElementById("chip0").style.background = scene_.teams[0];
 document.getElementById("chip1").style.background = scene_.teams[1];
 if (THEME === "toy") document.getElementById("brand").textContent = "TOY BOX FOOTBALL";
 
 const camPos = new THREE.Vector3(), camTarget = new THREE.Vector3();
+const smoothPos = new THREE.Vector3(), smoothTarget = new THREE.Vector3();
+let smoothInit = false;
+const followRing = new THREE.Mesh(new THREE.RingGeometry(0.7, 0.95, 32),
+  new THREE.MeshBasicMaterial({ color: 0xffe14d, transparent: true, opacity: 0.9, depthWrite: false }));
+followRing.rotation.x = -Math.PI / 2;
+followRing.visible = false;
+scene.add(followRing);
 function update(f) {
   f = clamp(f, 0, N - 1);
   for (const pl of players) updatePlayer(pl, f);
@@ -641,6 +1096,23 @@ function update(f) {
     marker.rotation.y = f * 0.08;
     marker.material.color.set(scene_.teams[op.p.team] ?? "#ffe14d").offsetHSL(0, 0, 0.15);
   }
+  // around a touch the ball meets the foot / head / hands that plays it
+  const tb = touchBall(f);
+  if (tb) {
+    ballMesh.position.copy(tb);
+    ballBlob.position.set(tb.x, THEME === "toy" ? 0.07 : 0.02, tb.z);
+  }
+  // a keeper holding the ball: it sits in his hands (from the 3D pose when there is one)
+  if (ball.hands?.[Math.round(f)] && op && op.root.visible) {
+    const hp = handsPosition(op);
+    if (pose3dWeight(op.p, f - op.p.start) < 0.3) {   // no pose: hug it at the chest
+      op.root.updateMatrixWorld(true);
+      hp.copy(op.chest.localToWorld(new THREE.Vector3(0, 0.35, 0.38)));
+    }
+    ballMesh.position.copy(hp);
+    ballMesh.visible = true;
+    ballBlob.position.set(hp.x, THEME === "toy" ? 0.07 : 0.02, hp.z);
+  }
 
   // broadcast-style camera following the real camera's view on the pitch
   const i = Math.round(f);
@@ -655,15 +1127,109 @@ function update(f) {
   const zMax = W / 2 + 3 - nearReach;
   camTarget.set(clamp(cx, -L / 2 + 5, L / 2 - 5), 0, clamp(cz, Math.min(-W / 2 + 10, zMax), zMax));
   camPos.set(lerp(camTarget.x, 0, 0.25), dist * Math.sin(elev), camTarget.z + dist * Math.cos(elev));
-  camera.position.copy(camPos);
-  camera.lookAt(camTarget);
+  // ?cam=wide: whole-pitch view (shows the players the broadcast camera doesn't see)
+  if (P.get("cam") === "wide") {
+    camTarget.set(0, 0, 2);
+    camPos.set(0, 72, 92);
+  }
+  // following a player: chase camera behind him, or his point of view
+  const fp = followId == null ? null : players.find((q) => q.p.id === followId);
+  for (const q of players) q.head.visible = true;
+  let fov = 30;
+  if (fp && fp.root.visible) {
+    fp.root.updateMatrixWorld(true);
+    if (povMode) {
+      // eyes: front of the head, looking where the head points (a little down, at the play)
+      const eye = fp.head.localToWorld(new THREE.Vector3(0, 0.05, 0.3));
+      const look = fp.head.localToWorld(new THREE.Vector3(0, -0.25, 10));
+      fp.head.visible = false;
+      camPos.copy(eye);
+      camTarget.copy(look);
+      fov = 70;
+    } else {
+      const yaw = fp.root.rotation.y, back = new THREE.Vector3(-Math.sin(yaw), 0, -Math.cos(yaw));
+      camTarget.copy(fp.root.position).setY(1.2);
+      camPos.copy(camTarget).addScaledVector(back, 8).add(new THREE.Vector3(0, 3.2, 0));
+      fov = 45;
+    }
+  }
+  if (camera.fov !== fov) { camera.fov = fov; camera.updateProjectionMatrix(); }
+  if (fp && fp.root.visible) {  // ease the follow cameras (players turn quickly); recordings
+                                // step frames in order, so this stays deterministic there too
+    const k = povMode ? 0.35 : 0.12;
+    smoothPos.lerp(camPos, smoothInit ? k : 1);
+    smoothTarget.lerp(camTarget, smoothInit ? k : 1);
+    smoothInit = true;
+    camera.position.copy(smoothPos);
+    camera.lookAt(smoothTarget);
+  } else {
+    smoothInit = false;
+    camera.position.copy(camPos);
+    camera.lookAt(camTarget);
+  }
+  followRing.visible = !!(fp && fp.root.visible && !povMode);
+  if (followRing.visible) followRing.position.set(fp.root.position.x, 0.03, fp.root.position.z);
   sun.position.set(camTarget.x - 30, 60, camTarget.z + 20);
   sun.target.position.copy(camTarget);
 
+  updateCrowd(f);
+  const goal = goalAt(f);
+  goalEl.style.display = goal ? "block" : "none";
+  if (goal) goalEl.style.background = scene_.teams[goal.team] ?? "#e5293b";
   const t = f / FPS;
   clockEl.textContent = `${String(Math.floor(t / 60)).padStart(2, "0")}:${String(Math.floor(t % 60)).padStart(2, "0")}`;
   renderer.render(scene, camera);
 }
+
+if (USE_POSE && P.get("plant") !== "0") buildPlants();   // ?plant=0 → no foot locking
+buildTouches();
+
+// where each touch meets the ball, and with which leg: posed once at load
+function buildTouches() {
+  BUILDING_PLANTS = true;
+  for (const pl of players) {
+    for (const t of pl.touches) {
+      updatePlayer(pl, t.f);
+      if (!pl.root.visible) continue;
+      const bx = ball.x[t.f], by = ball.y[t.f];
+      if (bx != null) {                          // kick with the leg on the ball's side
+        const [x, z] = toWorld(bx, by), yaw = pl.root.rotation.y;
+        const dx = x - pl.root.position.x, dz = z - pl.root.position.z;
+        t.leg = dx * Math.cos(yaw) - dz * Math.sin(yaw) > 0 ? 1 : 0;  // person's left = +x
+      }
+      updatePlayer(pl, t.f);
+      pl.root.updateMatrixWorld(true);
+      const fwd = new THREE.Vector3(Math.sin(pl.root.rotation.y), 0, Math.cos(pl.root.rotation.y));
+      const r = ballMesh.geometry.parameters.radius;
+      if (t.type === "kick") t.at = soleWorld(pl, t.leg).addScaledVector(fwd, r).setY(r);
+      else if (t.type === "header") t.at = pl.head.getWorldPosition(new THREE.Vector3()).addScaledVector(fwd, 0.3);
+      else t.at = handsPosition(pl).add(new THREE.Vector3(0, 0.15, 0));
+    }
+  }
+  BUILDING_PLANTS = false;
+}
+
+window.__touches = () => players.flatMap((pl) => pl.touches.map((t) => ({
+  player: pl.p.id, role: pl.p.role, f: t.f, type: t.type, leg: t.leg,
+  at: t.at && t.at.toArray().map((v) => +v.toFixed(2)) })));
+
+// the ball leaves from the contact point: blended in over the frames around each touch
+function touchBall(f) {
+  for (const pl of players) {
+    for (const t of pl.touches) {
+      if (!t.at || f < t.f - 3 || f > t.f + 6) continue;
+      const bx = sample(ball.x, f), by = sample(ball.y, f);
+      if (bx == null) continue;
+      const r = ballMesh.geometry.parameters.radius;
+      const [x, z] = toWorld(bx, by);
+      const data = new THREE.Vector3(x, r + (sample(ball.z, f) ?? 0), z);
+      const w = f <= t.f ? (f - (t.f - 3)) / 3 : 1 - (f - t.f) / 6;   // 0 → 1 at contact → 0
+      return data.lerp(t.at, clamp(w, 0, 1));
+    }
+  }
+  return null;
+}
+
 
 // ─────────────────────────── playback / recording ───────────────────────────
 window.__N = N;
@@ -682,13 +1248,91 @@ window.__seekStep = async (f) => {
 window.__frame = (f, q = 0.92) => { update(f); return renderer.domElement.toDataURL("image/jpeg", q); };
 
 if (!RECORD) {
+  // ── minimise / restore the real match (remembered per browser) ──
+  const pip = document.getElementById("pip");
+  const store = (k, v) => { try { v === undefined ? localStorage.removeItem(k) : localStorage.setItem(k, v); } catch {} };
+  const stored = (k) => { try { return localStorage.getItem(k); } catch { return null; } };
+  const setMin = (on) => { pip.classList.toggle("min", on); store("toonball.pipMin", on ? "1" : undefined); };
+  setMin(stored("toonball.pipMin") === "1");
+  document.getElementById("pipMin").onclick = () => setMin(true);
+  document.getElementById("pipTab").onclick = () => setMin(false);
+
+  // ── click a player to follow him; Follow / POV / ✕ ──
+  const bar = document.getElementById("follow"), label = document.getElementById("followLabel");
+  const camBtn = document.getElementById("followCam"), povBtn = document.getElementById("followPov");
+  const refreshBar = () => {
+    const pl = players.find((q) => q.p.id === followId);
+    bar.classList.toggle("on", !!pl);
+    if (!pl) return;
+    const p = pl.p, num = shirtNumber.get(p.id);
+    const who = p.role === "referee" ? "Referee" : p.role === "goalkeeper" ? "Keeper" : "Player";
+    const side = p.team === 0 ? " · HOME" : p.team === 1 ? " · AWAY" : "";
+    label.textContent = `${who}${num ? " #" + num : ""}${side}`;
+    document.getElementById("followChip").style.background = p.team >= 0 ? scene_.teams[p.team] : "#111";
+    camBtn.classList.toggle("active", !povMode);
+    povBtn.classList.toggle("active", povMode);
+  };
+  const follow = (id) => { followId = id; if (id == null) povMode = false; smoothInit = false; refreshBar(); };
+  camBtn.onclick = () => { povMode = false; refreshBar(); };
+  povBtn.onclick = () => { povMode = true; refreshBar(); };
+  document.getElementById("followOff").onclick = () => follow(null);
+  addEventListener("keydown", (e) => {
+    if (e.key === "Escape") follow(null);
+    if ((e.key === "p" || e.key === "P") && followId != null) { povMode = !povMode; refreshBar(); }
+  });
+  const ray = new THREE.Raycaster(), ndc = new THREE.Vector2();
+  let down = null;
+  renderer.domElement.addEventListener("pointerdown", (e) => (down = [e.clientX, e.clientY]));
+  renderer.domElement.addEventListener("pointerup", (e) => {
+    if (!down || Math.hypot(e.clientX - down[0], e.clientY - down[1]) > 6) return;  // a drag
+    const r = renderer.domElement.getBoundingClientRect();
+    ndc.set(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
+    ray.setFromCamera(ndc, camera);
+    const visible = players.filter((q) => q.root.visible);
+    const hit = ray.intersectObjects(visible.map((q) => q.root), true)[0];
+    if (hit) {
+      let o = hit.object;
+      while (o && !visible.some((q) => q.root === o)) o = o.parent;
+      const pl = visible.find((q) => q.root === o);
+      if (pl) follow(pl.p.id);
+    } else {
+      // generous click: the nearest player on screen within ~40 px
+      let best = null, bd = 40;
+      for (const q of visible) {
+        const v = q.root.position.clone().setY(1.2).project(camera);
+        const d = Math.hypot((v.x - ndc.x) * r.width / 2, (v.y - ndc.y) * r.height / 2);
+        if (d < bd) { bd = d; best = q; }
+      }
+      if (best) follow(best.p.id);
+    }
+  });
+  refreshBar();
+  // test hook: screen position of the visible player nearest the screen centre
+  window.__pickable = () => {
+    const r = renderer.domElement.getBoundingClientRect();
+    let best = null, bd = Infinity;
+    for (const q of players) {
+      if (!q.root.visible) continue;
+      const v = q.root.position.clone().setY(1.0).project(camera);
+      if (Math.abs(v.x) > 0.9 || Math.abs(v.y) > 0.9) continue;
+      const d = Math.hypot(v.x, v.y);
+      if (d < bd) { bd = d; best = { id: q.p.id, x: r.left + (v.x + 1) / 2 * r.width, y: r.top + (1 - v.y) / 2 * r.height }; }
+    }
+    return best;
+  };
+
   const video = document.getElementById("broadcast");
   video.src = `${RUN}/${scene_.video}`;
   const seek = document.getElementById("seek"), play = document.getElementById("play");
   const themeSel = document.getElementById("theme"), layoutSel = document.getElementById("layout");
-  themeSel.value = THEME; layoutSel.value = LAYOUT;
-  const go = () => { P.set("theme", themeSel.value); P.set("layout", layoutSel.value); location.search = P; };
-  themeSel.onchange = layoutSel.onchange = go;
+  const poseBox = document.getElementById("pose");
+  themeSel.value = THEME; layoutSel.value = LAYOUT; poseBox.checked = USE_POSE;
+  const go = () => {
+    P.set("theme", themeSel.value); P.set("layout", layoutSel.value);
+    P.set("pose", poseBox.checked ? "1" : "0");
+    location.search = P;
+  };
+  themeSel.onchange = layoutSel.onchange = poseBox.onchange = go;
   seek.max = N - 1;
   play.onclick = () => (video.paused ? video.play() : video.pause());
   video.onplay = () => (play.textContent = "❚❚");

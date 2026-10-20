@@ -27,6 +27,7 @@ class World:
     calibrated: np.ndarray             # (F,) bool
     colours: list[str] = field(default_factory=list)
     flights: list[dict] = field(default_factory=list)
+    hands: np.ndarray | None = None    # (F,) ball held in a keeper's hands
 
 
 def _camera(H: np.ndarray, size: tuple[int, int]) -> tuple[np.ndarray, np.ndarray]:
@@ -49,9 +50,10 @@ def build(people: pl.DataFrame, teams: pl.DataFrame, ball: pl.DataFrame, H: np.n
           colour_of: Callable[[list[int]], str | None] | None = None) -> World:
     F = len(H)
     tracks = build_tracks(people, teams, H, size, fps, F, colour_of)
-    b = build_ball(ball, H, P, tracks, fps)
+    b = build_ball(ball, H, P, tracks, fps, people)
     cam, ok = _camera(H, size)
-    return World(fps, F, tracks, b.x, b.y, b.z, b.owner, b.kicks, cam, ok, colours, b.flights)
+    return World(fps, F, tracks, b.x, b.y, b.z, b.owner, b.kicks, cam, ok, colours, b.flights,
+                 b.hands)
 
 
 def to_frame(world: World) -> pl.DataFrame:

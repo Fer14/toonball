@@ -33,6 +33,7 @@ build-backend = "hatchling.build"
 
 [tool.ruff]
 line-length = 100
+extend-exclude = ["toonball/pose/magf"]   # vendored MotionAGFormer
 
 # NVIDIA driver here is CUDA 12.2 -> use cu121 wheels
 [[tool.uv.index]]

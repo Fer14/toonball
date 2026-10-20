@@ -33,6 +33,9 @@ class Track:
     alpha: np.ndarray  # 1 = seen, fading towards 0 around entries / exits
     colour: str | None = None
     raw_ids: list[int] = field(default_factory=list)
+    pose: dict[str, np.ndarray] | None = None   # joint angles, see toonball/pose/angles.py
+    pose3d: dict[str, np.ndarray] | None = None  # 3D joints, see toonball/pose/lift.py
+    seen: np.ndarray | None = None               # (n,) bool: detected (vs inferred off camera)
 
 
 def _on_pitch(xy: np.ndarray, margin: float) -> np.ndarray:
@@ -102,7 +105,7 @@ def _merge(a: dict, b: dict) -> dict:
 
 
 def _stitch(segs: list[dict], fps: float, max_gap_s: float = 3.0,
-            max_overlap_s: float = 0.6) -> list[dict]:
+            max_overlap_s: float = 1.0) -> list[dict]:
     """Greedy chaining by start time. A segment continues a chain if the person could have run
     there in the gap, or — for overlapping segments — if both follow the same path (duplicate)."""
     chains: list[dict] = []
@@ -219,6 +222,21 @@ def build_tracks(people: pl.DataFrame, teams: pl.DataFrame, H: np.ndarray,
                 roles[i] = "goalkeeper"
                 chains[i]["team"] = left_team if side == 0 else 1 - left_team
                 taken.append((a, b))
+
+    # people at the edge who aren't players: staff / substitutes / ball kids standing outside
+    # the lines (dropped), and assistant referees running along a touchline
+    keep = []
+    for k, c in enumerate(chains):
+        x, y = c["x"], c["y"]
+        outside = (y < -0.5) | (y > pitch.WIDTH + 0.5) | (x < -0.5) | (x > pitch.LENGTH + 0.5)
+        if outside.mean() > 0.7 and np.ptp(x) < 3 and np.ptp(y) < 3:
+            continue
+        on_line = (y < 3) | (y > pitch.WIDTH - 3)
+        if (roles[k] == "player" and on_line.mean() > 0.85 and np.ptp(y) < 4
+                and len(c["f"]) > 4 * fps):
+            roles[k] = "referee"
+        keep.append(k)
+    chains, roles = [chains[k] for k in keep], [roles[k] for k in keep]
 
     polys = _view_polygons(H, size)
     out = []

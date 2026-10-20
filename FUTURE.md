@@ -2,6 +2,12 @@
 
 ## Known issues to follow up (noted 2026-10-20)
 
+- [ ] **Other broadcasts look far off** (Kaggle highlight reels from other leagues):
+  calibration, kit colours and shot selection. Tracked in
+  [#1](https://github.com/Fer14/toonball/issues/1).
+- [ ] **3D pose exaggerates crouches**: in 573e61_0 the keeper briefly lies flat after his
+  catch, while the real keeper is crouched low (see #1).
+
 Measured with the motion diagnostics after the calibration / goalkeeper / ball rewrite.
 
 - [ ] **No ball height on the Kaggle video** (`clips/kaggle_106.mp4`). Its frames don't fit a
@@ -20,22 +26,59 @@ Measured with the motion diagnostics after the calibration / goalkeeper / ball r
 
 ## Pose estimation for player animation
 
-**Problem:** players are animated procedurally (run cycle from speed, facing from heading).
-Legs swing too much and every player moves the same way; real body language is lost.
+### v2 — full-body 3D pose (branch `pose-estimation`)
 
-**Idea:** estimate a body pose per player and per frame, and drive the avatar's skeleton with it
-instead of the procedural cycle.
+- **2D:** YOLO11m-pose on upscaled crops of every tracked box (`toonball/pose/estimate.py` →
+  `pose.parquet`).
+- **3D:** VideoPose3D (Human3.6M, COCO input), reimplemented in `toonball/pose/lift.py` and
+  loaded from the released checkpoint. It lifts each person's 2D sequence (±121 frames) to 17
+  joints and rotates them into pitch axes with the estimated broadcast camera. The constant
+  tilt between H36M's near-horizontal cameras and the elevated broadcast camera is removed by
+  making the median spine vertical. Left/right flips of the 2D model are fixed over time
+  before lifting.
+- **Viewer** (`applyPose3d`): skeleton body → pelvis → chest → head / shoulders → elbows,
+  pelvis → hips → knees. Every bone is aimed at its 3D direction, body facing comes from hips
+  and shoulders, and the lower foot stays on the grass. Fully pose-driven on 83–94 % of
+  visible player-frames. The scripted kick, keeper stance and dives only run where the pose
+  is missing.
+- **Ball in the keeper's hands:** possession is now also decided in the image (ball inside a
+  player's box), because a held ball projects ~5 m behind the keeper on the grass. A keeper
+  holding it in the upper half of his box carries it in his hands.
+- **Pass timing:** each possession is dated back to the first / last frame the ball was
+  really with that player (the 4-frame hysteresis used to keep it glued to the foot after
+  the kick).
+- **Known weakness:** poses are looser than the real ones (e.g. a crouched catch comes out
+  fairly upright); H36M has no football movements and our players are 50–150 px tall.
 
-- **2D keypoints** on each tracked crop: RTMPose / ViTPose (COCO-17), or YOLO11-pose run on the
-  player boxes. Players are 50–150 px tall in wide shots, so upscale the crops and smooth the
-  keypoints over time per track (One-Euro filter / Savitzky–Golay).
-- **2D → 3D lifting:** MotionBERT / VideoPose3D on the per-track 2D sequence, or world-grounded
-  mesh recovery (GVHMR, 4DHumans / HMR2.0, CameraHMR) on closer shots. Use the pitch homography /
-  camera matrix to put the root on the ground plane and keep feet planted (no foot sliding).
-- **Retargeting:** map joint rotations onto the avatar rig (hips, knees, shoulders, elbows,
-  head). Fall back to the procedural cycle when keypoint confidence is low (occlusion, tiny
-  players).
-- **Cheaper middle ground:** use pose only for events (kick leg, header, goalkeeper dive,
-  throw-in arms), detected from keypoints, and keep the procedural cycle otherwise.
-- **Cost:** about 5–10 ms per crop for RTMPose-m on the 3060, so roughly 22 crops × 25 fps
-  → an offline pass, cached as `pose.parquet` next to `state.parquet`.
+### Done since v2
+
+- [x] **Foot planting** (#3): stepping cycle with physics-based swing while moving, standing
+  foot locked by two-bone IK. Standing-foot sliding 2.0 → 0.4 m/s.
+- [x] **Ball contact from the body** (#4): kicks / headers / throw-ins / keeper throws timed
+  to the release frame; the ball leaves from the foot, head or hands.
+- [x] **Stronger lifter** (#5): MotionAGFormer-B (WACV 2024) is the default. 2D agreement
+  −16 %, jitter −10 %, crouches deeper.
+- [x] **Full teams** (#6): 11 + 11 for the whole clip, inferred off camera.
+- [x] **Look and feel** (#7): shirt numbers by position, 3D crowd reacting to danger, goal
+  celebrations.
+
+### Next
+
+- **Left/right:** resolve which leg leads from the foot on the ground (the lowest ankle, which
+  stays still in pitch coordinates) instead of the model's L/R labels.
+- **Stronger lifting model:** MotionAGFormer / MotionBERT, or fine-tune the lifter on
+  football motion (e.g. synthetic data from a game engine).
+- **Foot locking:** keep a planted foot fixed on the grass in pitch coordinates (removes
+  sliding).
+- **Events from pose:** kicks (one leg far forward), headers (both ankles off the ground),
+  throw-ins (both hands above the head), goalkeeper dives (torso near horizontal) — instead of
+  inferring them from the ball alone.
+- **Mesh recovery on closer shots:** GVHMR, 4DHumans or CameraHMR for hand and head
+  detail.
+- **Faster crops:** RTMPose-m (≈5 ms per crop) if the pose pass becomes the bottleneck on long
+  videos.
+- **Real shirt numbers:** jersey OCR on the clearest crops of each person (e.g. PARSeq, or a
+  small VLM), voted over the whole track; today numbers follow position.
+- **More footage:** needs the Kaggle token for the DFL competition (dozens of clips + full
+  halves).
+- **Sound:** crowd noise following the excitement curve, a whistle at the goal.

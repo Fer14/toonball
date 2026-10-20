@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
+import os
 import subprocess
 from pathlib import Path
 
 import numpy as np
+import polars as pl
 import typer
 
 app = typer.Typer(add_completion=False, no_args_is_help=True)
 ROOT = Path(__file__).resolve().parents[1]
 WEIGHTS = ROOT / "weights"
 MAX_W = 1920  # shots are re-encoded to at most this width
+LIFTER = os.environ.get("TOONBALL_LIFTER", "motionagformer")  # or "videopose3d"
 
 
 def _ffmpeg_cut(src: Path, dst: Path, start_f: int | None = None, end_f: int | None = None,
@@ -25,7 +28,7 @@ def _ffmpeg_cut(src: Path, dst: Path, start_f: int | None = None, end_f: int | N
                     "-pix_fmt", "yuv420p", str(dst)], check=True)
 
 
-def _pipeline(store, force: bool = False) -> dict:
+def _pipeline(store, force: bool = False, pose_on: bool = True) -> dict:
     """clip.mp4 in a store dir → detections → teams → calibration → world → scene.json."""
     from toonball.calib import camera, homography, motion
     from toonball.detect import run as detect
@@ -74,16 +77,45 @@ def _pipeline(store, force: bool = False) -> dict:
 
     w = world.build(store.df("people"), store.df("teams"), store.df("ball_raw"), H, P, fps,
                     size, store.json("colours"), colour_of)
+
+    if pose_on:
+        from toonball.pose import angles, estimate
+        if force or not store.has("pose.parquet"):
+            estimate.run(str(video), store.df("people"),
+                         str(WEIGHTS / "yolo11m-pose.pt")).write_parquet(store.path("pose.parquet"))
+        kps = angles.index(pl.read_parquet(store.path("pose.parquet")))
+        for t in w.tracks:
+            t.pose = angles.track_angles(t, kps, H, fps, w.ball_x, w.ball_y)
+        # full-body 3D pose: lift each person's 2D sequence, rotate into pitch axes with the
+        # broadcast camera (its rotation is usable even when the tripod fit is too loose for
+        # ball heights)
+        if np.isfinite(cams.P[:, 0, 0]).any():
+            import torch
+
+            from toonball.pose import lift
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            lifter = lift.load(LIFTER, WEIGHTS, device)
+            R_cam = lift.camera_rotations(cams.P, size)
+            for t in w.tracks:
+                t.pose3d = lift.lift_track(lifter, t, kps, R_cam, fps)
+
+    # full teams: every player exists for the whole clip, also while off camera
+    from toonball.track import offscreen
+    w.tracks, remap = offscreen.fill(w.tracks, H, size, fps, (w.ball_x, w.ball_y))
+    w.owner = np.array([remap.get(int(o), -1) if o >= 0 else -1 for o in w.owner])
+    w.kicks = [(f, remap[i]) for f, i in w.kicks if i in remap]
     store.put_df("state", world.to_frame(w))
     store.put_json("flights", w.flights)
     export(w, store.path("scene.json"), "clip.mp4")
     ball_ok = float(np.isfinite(w.ball_x[w.calibrated]).mean()) if w.calibrated.any() else 0.0
     gks = sum(t.role == "goalkeeper" for t in w.tracks)
+    per_team = [sum(t.team == k and t.role != "referee" for t in w.tracks) for k in (0, 1)]
     summary = {"calibrated": float(np.isfinite(H[:, 0, 0]).mean()), "tracks": len(w.tracks),
                "ball": ball_ok, "kicks": len(w.kicks), "flights": len(w.flights)}
     typer.echo(f"  {store.dir.name}: calibrated {summary['calibrated']:.0%}  tracks "
                f"{summary['tracks']} (gk {gks})  ball {summary['ball']:.0%}  kicks "
-               f"{summary['kicks']}  3D flights {len(w.flights)}  camera err {err:.0f}px")
+               f"{summary['kicks']}  3D flights {len(w.flights)}  camera err {err:.0f}px  "
+               f"team sizes {per_team[0]}+{per_team[1]}")
     return summary
 
 
@@ -120,6 +152,7 @@ def make(
     layout: str = typer.Option("pip", help="pip | side | game"),
     min_shot: float = typer.Option(3.0, help="shortest wide shot kept (s)"),
     force: bool = typer.Option(False, help="recompute cached stages"),
+    record: bool = typer.Option(True, help="render MP4s (off: only scene.json for the viewer)"),
 ):
     """Any football video → cartoon video. Cuts, replays and close-ups are skipped."""
     from toonball.io import shots
@@ -148,7 +181,11 @@ def make(
         st.put_json("source", {"video": str(video), **s})
         _pipeline(st, force)
         ref = _align_teams(st.path("scene.json"), ref)
-        parts.append(_record(st.dir, theme, layout))
+        if record:
+            parts.append(_record(st.dir, theme, layout))
+    if not record:
+        typer.echo(f"viewer: /viewer/index.html?run=/runs/{top.dir.name}/shots/NN")
+        return
 
     out = top.dir / f"{top.dir.name}_{layout}_{theme}.mp4"
     lst = top.path("concat.txt")

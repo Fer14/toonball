@@ -11,11 +11,39 @@
   #stage { position: absolute; inset: 0; }
   #stage canvas { display: block; width: 100%; height: 100%; }
   body.side #stage { left: 50%; }
-  #broadcast { position: absolute; background: #000; object-fit: contain; z-index: 2; }
-  body.pip #broadcast { right: 2%; bottom: 3%; width: 30%; border: 4px solid #fff;
-    border-radius: 14px; box-shadow: 0 6px 24px rgba(0,0,0,.45); }
-  body.side #broadcast { left: 0; top: 0; width: 50%; height: 100%; }
-  body.game #broadcast { display: none; }
+  #pip { position: absolute; z-index: 2; }
+  #broadcast { display: block; width: 100%; height: 100%; background: #000; object-fit: contain; }
+  body.pip #pip { right: 2%; bottom: 3%; width: 30%; aspect-ratio: 16 / 9; border: 4px solid #fff;
+    border-radius: 14px; box-shadow: 0 6px 24px rgba(0,0,0,.45); overflow: hidden; }
+  body.pip:not(.record) #pip { bottom: 64px; }   /* clear of the controls bar */
+  body.side #pip { left: 0; top: 0; width: 50%; height: 100%; }
+  body.game #pip { display: none; }
+  /* minimise the real match into a small tab */
+  #pipMin, #pipTab { position: absolute; border: 0; cursor: pointer; font: inherit; font-weight: 800; }
+  #pipMin { right: 8px; top: 8px; width: 34px; height: 34px; border-radius: 50%; font-size: 22px;
+    line-height: 30px; background: rgba(255,255,255,.92); color: #1d2433; opacity: .85; }
+  #pipMin:hover { opacity: 1; }
+  #pipTab { display: none; right: 0; bottom: 0; white-space: nowrap; padding: .5em 1em;
+    border-radius: 999px; background: rgba(255,255,255,.95); color: #1d2433;
+    box-shadow: 0 4px 16px rgba(0,0,0,.3); }
+  body.pip #pip.min { width: auto; aspect-ratio: auto; border: 0; box-shadow: none; overflow: visible; }
+  #pip.min #broadcast, #pip.min #pipMin { display: none; }
+  #pip.min #pipTab { display: block; position: static; }
+  body.side #pipMin, body.record #pipMin, body.record #pipTab { display: none; }
+
+  /* following a player */
+  #follow { display: none; position: absolute; left: 50%; top: 3%; transform: translateX(-50%);
+    z-index: 3; align-items: center; gap: 6px; padding: 6px 6px 6px 14px; border-radius: 999px;
+    background: rgba(29,36,51,.9); color: #fff; font-weight: 700; font-size: 15px;
+    box-shadow: 0 4px 16px rgba(0,0,0,.3); }
+  #follow.on { display: flex; }
+  #follow .chip { width: 14px; height: 14px; border-radius: 50%; border: 2px solid #fff; }
+  #follow button { font: inherit; border: 0; border-radius: 999px; padding: 4px 12px; cursor: pointer;
+    background: rgba(255,255,255,.15); color: #fff; }
+  #follow button.active { background: #fff; color: #1d2433; }
+  body.record #follow { display: none !important; }
+  #stage canvas { cursor: pointer; }
+  #hint { opacity: .75; font-size: 13px; }
 
   #hud { position: absolute; left: 2%; top: 3%; z-index: 3; display: flex; gap: 0;
     background: var(--hud-bg); color: var(--hud-fg); border-radius: 999px; overflow: hidden;
@@ -27,6 +55,10 @@
   #hud .clock { font-variant-numeric: tabular-nums; background: #1d2433; color: #fff; }
   #live { position: absolute; right: 2%; top: 3%; z-index: 3; background: #e5293b; color: #fff;
     font-weight: 800; font-size: 1.8vh; padding: .35em .8em; border-radius: 8px; letter-spacing: .1em; }
+  #goal { display: none; position: absolute; left: 50%; top: 38%; transform: translate(-50%, -50%) rotate(-4deg);
+    z-index: 3; color: #fff; font-weight: 900; font-size: 14vh; letter-spacing: .06em; padding: .05em .45em;
+    border-radius: 24px; border: 8px solid #fff; text-shadow: 0 6px 0 rgba(0,0,0,.35);
+    box-shadow: 0 12px 40px rgba(0,0,0,.4); }
   body.toy { --hud-bg: #fff6d6; --hud-fg: #5a3210; --accent: #e8542c; }
   body.toy #hud { border: 3px solid #5a3210; font-family: "Comic Sans MS", "Chalkboard", cursive; }
 
@@ -45,7 +77,17 @@
 </head>
 <body>
 <div id="stage"></div>
-<video id="broadcast" muted playsinline></video>
+<div id="pip">
+  <video id="broadcast" muted playsinline></video>
+  <button id="pipMin" title="Minimise the real match">–</button>
+  <button id="pipTab" title="Show the real match">▣ Real match</button>
+</div>
+<div id="follow">
+  <span class="chip" id="followChip"></span><span id="followLabel"></span>
+  <button id="followCam" title="Camera behind the player">Follow</button>
+  <button id="followPov" title="See what the player sees (P)">POV</button>
+  <button id="followOff" title="Back to the broadcast camera (Esc)">✕</button>
+</div>
 <div id="hud">
   <div class="brand" id="brand">TOONBALL</div>
   <div><span class="chip" id="chip0"></span>HOME</div>
@@ -53,11 +95,14 @@
   <div class="clock" id="clock">00:00</div>
 </div>
 <div id="live">● LIVE</div>
+<div id="goal">GOAL!</div>
 <div id="controls">
   <button id="play">▶</button>
   <input id="seek" type="range" min="0" max="1" step="1" value="0">
   <select id="theme"><option value="wii">Mii stadium</option><option value="toy">Toy box</option></select>
   <select id="layout"><option value="pip">Picture-in-picture</option><option value="side">Side by side</option><option value="game">Game only</option></select>
+  <label><input id="pose" type="checkbox" checked> pose from video</label>
+  <span id="hint">click a player to follow him</span>
 </div>
 <script type="module" src="./game.js"></script>
 </body>
