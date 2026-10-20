@@ -113,7 +113,24 @@ uv run python -m http.server 8000
 ```
 
 Then open `http://127.0.0.1:8000/viewer/index.html?run=/runs/0bfacc_0/shots/00&theme=wii&layout=pip`.
-It has play / seek, and theme and layout switches.
+It has play / seek, and theme, layout and pose switches. URL options:
+
+| Option | |
+|---|---|
+| `theme=wii` / `toy` | Mii stadium / toy box |
+| `layout=pip` / `side` / `game` | real match bottom-right / side by side / cartoon only |
+| `pose=0` | procedural animation only (no pose from the video) |
+| `plant=0` | no foot locking |
+| `cam=wide` | whole-pitch camera (shows the players off the broadcast camera) |
+| `focus=<id>` | close-up camera following one player |
+| `goal=<frame>` | preview the goal celebration at that frame |
+
+### What the cartoon shows
+
+- **All 22 players** for the whole clip. Off camera they move with their team, never inside the shot (`toonball/track/offscreen.py`).
+- **Full-body 3D pose** from the video: torso, head, arms, and legs when standing. While running, a stepping cycle locked to the real footsteps drives the legs, with standing feet planted by IK (no sliding).
+- **Ball contact from the body:** kicks, headers, throw-ins and keeper throws happen exactly when the ball leaves the player, and the ball leaves from that foot, head or hands. A keeper holding the ball carries it in his hands.
+- **Atmosphere:** shirt numbers (by position), a 3D crowd in both teams' colours that stands up when it gets dangerous near a goal, and goal celebrations.
 
 ### Commands
 

@@ -44,6 +44,18 @@ Measured with the motion diagnostics after the calibration / goalkeeper / ball r
 - **Known weakness:** poses are looser than the real ones (e.g. a crouched catch comes out
   fairly upright); H36M has no football movements and our players are 50–150 px tall.
 
+### Done since v2
+
+- [x] **Foot planting** (#3): stepping cycle with physics-based swing while moving, standing
+  foot locked by two-bone IK. Standing-foot sliding 2.0 → 0.4 m/s.
+- [x] **Ball contact from the body** (#4): kicks / headers / throw-ins / keeper throws timed
+  to the release frame; the ball leaves from the foot, head or hands.
+- [x] **Stronger lifter** (#5): MotionAGFormer-B (WACV 2024) is the default. 2D agreement
+  −16 %, jitter −10 %, crouches deeper.
+- [x] **Full teams** (#6): 11 + 11 for the whole clip, inferred off camera.
+- [x] **Look and feel** (#7): shirt numbers by position, 3D crowd reacting to danger, goal
+  celebrations.
+
 ### Next
 
 - **Left/right:** resolve which leg leads from the foot on the ground (the lowest ankle, which
@@ -59,3 +71,8 @@ Measured with the motion diagnostics after the calibration / goalkeeper / ball r
   detail.
 - **Faster crops:** RTMPose-m (≈5 ms per crop) if the pose pass becomes the bottleneck on long
   videos.
+- **Real shirt numbers:** jersey OCR on the clearest crops of each person (e.g. PARSeq, or a
+  small VLM), voted over the whole track; today numbers follow position.
+- **More footage:** needs the Kaggle token for the DFL competition (dozens of clips + full
+  halves).
+- **Sound:** crowd noise following the excitement curve, a whistle at the goal.
