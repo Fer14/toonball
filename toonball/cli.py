@@ -1,4 +1,4 @@
-"""toonball make | run | record."""
+"""toonball make | run | record | show."""
 
 from __future__ import annotations
 
@@ -15,6 +15,12 @@ ROOT = Path(__file__).resolve().parents[1]
 WEIGHTS = ROOT / "weights"
 MAX_W = 1920  # shots are re-encoded to at most this width
 LIFTER = os.environ.get("TOONBALL_LIFTER", "motionagformer")  # or "videopose3d"
+
+
+def _variant(name: str, flags: dict[str, bool]) -> str:
+    """Ablations ("before" clips) write to runs/<clip>@<variant>/ so cached stages are kept."""
+    on = [k for k, v in flags.items() if v]
+    return f"{name}@{'+'.join(on)}" if on else name
 
 
 def _ffmpeg_cut(src: Path, dst: Path, start_f: int | None = None, end_f: int | None = None,
@@ -153,18 +159,27 @@ def make(
     min_shot: float = typer.Option(3.0, help="shortest wide shot kept (s)"),
     force: bool = typer.Option(False, help="recompute cached stages"),
     record: bool = typer.Option(True, help="render MP4s (off: only scene.json for the viewer)"),
+    no_shots: bool = typer.Option(False, help="ablation: the whole video is one shot"),
 ):
     """Any football video → cartoon video. Cuts, replays and close-ups are skipped."""
     from toonball.io import shots
     from toonball.io.store import Store
 
-    top = Store(video, ROOT / "runs")
-    if force or not top.has("shots.json"):
+    top = Store(_variant(video.stem, {"no-shots": no_shots}), ROOT / "runs")
+    if no_shots and (force or not top.has("shots.json")):
+        import cv2
+        cap = cv2.VideoCapture(str(video))
+        fps, n = cap.get(cv2.CAP_PROP_FPS) or 25.0, int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        size = [int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))]
+        cap.release()
+        top.put_json("shots", {"video": str(video), "fps": fps, "n_frames": n, "size": size,
+                               "cuts": [0, n], "wide": [{"start": 0, "end": n}]})
+    elif force or not top.has("shots.json"):
         cuts, kps, sampled, n, fps, size = shots.prepass(
             str(video), str(WEIGHTS / "football-pitch-detection.pt"))
         wide = shots.wide_shots(cuts, kps, sampled, fps, size, min_s=min_shot)
-        top.put_json("shots", {"fps": fps, "n_frames": n, "size": list(size), "cuts": cuts,
-                               "wide": wide})
+        top.put_json("shots", {"video": str(video), "fps": fps, "n_frames": n,
+                               "size": list(size), "cuts": cuts, "wide": wide})
     info = top.json("shots")
     wide = info["wide"]
     kept = sum(s["end"] - s["start"] for s in wide) / info["fps"]
@@ -220,6 +235,24 @@ def record(
 ):
     """Render a run's scene.json in headless Chromium and mux with the source footage."""
     typer.echo(f"wrote {_record(run_dir, theme, layout)}")
+
+
+@app.command()
+def show(
+    stage: str,
+    run_dir: Path,
+    start: float = typer.Option(0.0, help="start time (s)"),
+    dur: float = typer.Option(0.0, help="duration (s), 0 = to the end"),
+    speed: float = typer.Option(1.0, help="playback speed, e.g. 0.5 for slow motion"),
+    out: str = typer.Option("", help="output MP4 (default RUN_DIR/show_<STAGE>.mp4)"),
+):
+    """Debug overlay of a stage on the real clip → 1920×1080 MP4. STAGE: shots (needs the
+    shots.json of `toonball make`)."""
+    from toonball.render import debug
+
+    out = Path(out) if out else run_dir / f"show_{stage}.mp4"
+    debug.render(stage, run_dir, out, start, dur, speed)
+    typer.echo(f"wrote {out}")
 
 
 if __name__ == "__main__":
