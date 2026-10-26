@@ -1,5 +1,7 @@
 // Frame-stepped capture of the game viewer → MP4, then composite with the broadcast.
 // usage: node scripts/record.mjs <run_dir> [wii|toy] [pip|side|game]
+// env: W, H (viewport, default 1600×900), MARK=thoth (corner mark instead of the TOONBALL pill),
+//      VIEW (extra viewer query), TAG (output name suffix), MAX_FRAMES
 import { spawn } from "node:child_process";
 import { createReadStream, existsSync, mkdirSync, statSync } from "node:fs";
 import http from "node:http";
@@ -9,7 +11,7 @@ import { chromium } from "playwright";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const [runDir, theme = "wii", layout = "pip"] = process.argv.slice(2);
-const W = 1600, H = 900;
+const W = Number(process.env.W || 1600), H = Number(process.env.H || 900);
 const runRel = "/" + path.relative(ROOT, runDir).split(path.sep).join("/");
 
 const TYPES = { ".html": "text/html", ".js": "text/javascript", ".json": "application/json",
@@ -45,7 +47,7 @@ if (layout !== "game") {
   videoParam = "&frames=rec_frames";
 }
 // VIEW: extra viewer query, e.g. VIEW="&cam=wide" for the whole-pitch camera
-await page.goto(`http://127.0.0.1:${port}/viewer/index.html?run=${runRel}&theme=${theme}&layout=${layout}&record=1${videoParam}${process.env.VIEW || ""}`);
+await page.goto(`http://127.0.0.1:${port}/viewer/index.html?run=${runRel}&theme=${theme}&layout=${layout}&record=1${videoParam}${process.env.MARK ? "&mark=" + process.env.MARK : ""}${process.env.VIEW || ""}`);
 await page.waitForFunction(() => window.__ready === true, null, { timeout: 120000 });
 const n = Math.min(await page.evaluate(() => window.__N), Number(process.env.MAX_FRAMES || Infinity));
 const fps = await page.evaluate(() => window.__fps);
