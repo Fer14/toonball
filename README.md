@@ -175,7 +175,9 @@ URL options:
 |---|---|
 | `toonball make VIDEO [--no-record]` | Full flow for any video: shots → pipeline per shot → render → one MP4 |
 | `toonball run CLIP [--start S --dur D]` | Pipeline on one continuous shot → `runs/<clip>/scene.json` |
-| `toonball record RUN_DIR [--theme --layout]` | Render a run to MP4 in headless Chromium (`VIEW="&focus=21"` adds viewer options, `TAG=` names the file) |
+| `toonball record RUN_DIR [--theme --layout]` | Render a run to MP4 in headless Chromium (`VIEW="&focus=21"` adds viewer options, `TAG=` names the file, `W=1920 H=1080` sets the size, `MARK=thoth` replaces the TOONBALL pill) |
+| `toonball make VIDEO --no-shots` | Ablation: the whole video as one shot, written to `runs/<video>@no-shots/` |
+| `toonball show shots RUN_DIR [--start --dur --speed --out]` | Debug overlay of the shot splitter on the real video (cut scores, shots, kept parts) → 1920×1080 MP4 |
 
 Every stage caches its output in `runs/<clip>/` (`people.parquet`, `homography.npy`,
 `pose.parquet`, `state.parquet`, `scene.json`, …), so changing the renderer or the smoothing
