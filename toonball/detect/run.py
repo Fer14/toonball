@@ -1,6 +1,12 @@
 """Single pass over the video: players (tracked), ball (sliced), pitch keypoints, crops.
 
 Writes nothing itself — returns arrays for the store to cache.
+
+The ball is about 10 px wide in a 1920 px broadcast frame, so after the frame is shrunk to the
+1280 px model input it is only a few pixels and the detector often misses it. It is searched in
+640 px tiles at full resolution instead: one tile centred on its last position while it is being
+followed, the whole grid of tiles when it is lost. `ball_tiles=False` is the ablation: the ball
+model sees the whole frame once at 1280 px.
 """
 
 from __future__ import annotations
@@ -26,6 +32,8 @@ class DetectOutput:
     keypoints: np.ndarray     # (F, 32, 3) x, y, conf
     crops: np.ndarray         # (N, CROP, CROP, 3) RGB
     crop_index: pl.DataFrame  # row i of crops -> frame, track_id
+    detections: pl.DataFrame  # every box before tracking: frame, cls, conf, x1, y1, x2, y2, source
+    ball_search: pl.DataFrame  # frame, mode (near | grid | near+grid | full), near_x, near_y
     fps: float
     size: tuple[int, int]     # w, h
 
@@ -72,6 +80,7 @@ def run(
     ball_conf: float = 0.2,
     crop_every: int = 3,
     max_frames: int | None = None,
+    ball_tiles: bool = True,
 ) -> DetectOutput:
     info = sv.VideoInfo.from_video_path(video)
     n = info.total_frames if max_frames is None else min(info.total_frames, max_frames)
@@ -86,6 +95,7 @@ def run(
     )
 
     rows, ball_rows, kps, crops, crop_rows = [], [], [], [], []
+    det_rows, search_rows = [], []
     last_ball_f, last_ball_xy = -100, (0.0, 0.0)
     frames = sv.get_video_frames_generator(video)
     for f, frame in enumerate(tqdm(frames, total=n, desc="detect")):
@@ -95,6 +105,8 @@ def run(
         det = sv.Detections.from_ultralytics(r)
         people = det[det.class_id != 0]
         people = people.with_nms(threshold=0.5, class_agnostic=True)
+        for box, cid, c in zip(people.xyxy, people.class_id, people.confidence):
+            det_rows.append((f, CLS_NAMES[int(cid)], float(c), *map(float, box), "full"))
         people = tracker.update_with_detections(people)
         for box, cid, c, tid in zip(people.xyxy, people.class_id, people.confidence,
                                     people.tracker_id):
@@ -106,16 +118,30 @@ def run(
                     crop_rows.append((f, int(tid)))
 
         # track the ball with one tile around its last position; full tiling only when lost
-        if f - last_ball_f <= 5:
+        near_xy = (-1, -1)
+        if not ball_tiles:
+            mode = "full"
+            b = sv.Detections.from_ultralytics(
+                balls(frame, imgsz=1280, conf=ball_conf, verbose=False, half=True)[0])
+        elif f - last_ball_f <= 5:
             cx, cy = last_ball_xy
-            near = [(int(np.clip(cx - TILE / 2, 0, max(0, info.width - TILE))),
-                     int(np.clip(cy - TILE / 2, 0, max(0, info.height - TILE))))]
-            b = _sliced_ball(balls, frame, near, ball_conf)
+            near_xy = (int(np.clip(cx - TILE / 2, 0, max(0, info.width - TILE))),
+                       int(np.clip(cy - TILE / 2, 0, max(0, info.height - TILE))))
+            mode = "near"
+            b = _sliced_ball(balls, frame, [near_xy], ball_conf)
             if not len(b):
+                mode = "near+grid"
                 b = _sliced_ball(balls, frame, origins, ball_conf)
         else:
+            mode = "grid"
             b = _sliced_ball(balls, frame, origins, ball_conf)
+        search_rows.append((f, mode, *near_xy))
+        src = "full" if mode == "full" else "tile"
+        for box, c in zip(b.xyxy, b.confidence):
+            det_rows.append((f, "ball", float(c), *map(float, box), src))
         b_full = det[det.class_id == 0]
+        for box, c in zip(b_full.xyxy, b_full.confidence):
+            det_rows.append((f, "ball", float(c), *map(float, box), "full"))
         if len(b_full):
             b = sv.Detections.merge([b, b_full]) if len(b) else b_full
         if len(b):
@@ -138,6 +164,10 @@ def run(
         keypoints=np.stack(kps).astype(np.float32),
         crops=np.stack(crops) if crops else np.zeros((0, CROP, CROP, 3), np.uint8),
         crop_index=pl.DataFrame(crop_rows, schema=["frame", "track_id"], orient="row"),
+        detections=pl.DataFrame(det_rows, schema=["frame", "cls", "conf", *box_cols, "source"],
+                                orient="row"),
+        ball_search=pl.DataFrame(search_rows, schema=["frame", "mode", "near_x", "near_y"],
+                                 orient="row"),
         fps=float(info.fps),
         size=(info.width, info.height),
     )

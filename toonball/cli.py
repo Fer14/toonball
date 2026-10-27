@@ -34,8 +34,10 @@ def _ffmpeg_cut(src: Path, dst: Path, start_f: int | None = None, end_f: int | N
                     "-pix_fmt", "yuv420p", str(dst)], check=True)
 
 
-def _pipeline(store, force: bool = False, pose_on: bool = True) -> dict:
-    """clip.mp4 in a store dir → detections → teams → calibration → world → scene.json."""
+def _pipeline(store, force: bool = False, pose_on: bool = True, ball_tiles: bool = True,
+              upto: str = "") -> dict:
+    """clip.mp4 in a store dir → detections → teams → calibration → world → scene.json.
+    upto="detect" stops after the detection tables."""
     from toonball.calib import camera, homography, motion
     from toonball.detect import run as detect
     from toonball.render.export import export
@@ -46,13 +48,17 @@ def _pipeline(store, force: bool = False, pose_on: bool = True) -> dict:
     if force or not store.has("people.parquet", "keypoints.npy"):
         d = detect.run(str(video), str(WEIGHTS / "football-player-detection.pt"),
                        str(WEIGHTS / "football-ball-detection.pt"),
-                       str(WEIGHTS / "football-pitch-detection.pt"))
+                       str(WEIGHTS / "football-pitch-detection.pt"), ball_tiles=ball_tiles)
         store.put_df("people", d.people)
         store.put_df("ball_raw", d.ball)
         store.put_np("keypoints", d.keypoints)
         store.put_np("crops", d.crops)
         store.put_df("crop_index", d.crop_index)
-        store.put_json("meta", {"fps": d.fps, "size": list(d.size)})
+        store.put_df("detections", d.detections)
+        store.put_df("ball_search", d.ball_search)
+        store.put_json("meta", {"fps": d.fps, "size": list(d.size), "ball_tiles": ball_tiles})
+    if upto == "detect":
+        return {}
     meta = store.json("meta")
     fps, size = meta["fps"], tuple(meta["size"])
 
@@ -216,15 +222,20 @@ def run(
     start: float = typer.Option(0.0, help="start time (s); clip is cut to [start, start+dur]"),
     dur: float = typer.Option(0.0, help="duration (s), 0 = whole clip"),
     force: bool = typer.Option(False, help="recompute cached stages"),
+    no_ball_tiles: bool = typer.Option(False, help="ablation: ball searched in the whole frame "
+                                       "at 1280 px instead of 640 px tiles"),
+    upto: str = typer.Option("", help="stop after this stage (detect)"),
 ):
     """Single continuous shot → scene.json (no cut detection)."""
     from toonball.io.store import Store
 
-    store = Store(clip.stem if not (start or dur) else f"{clip.stem}_{int(start)}s",
-                  ROOT / "runs")
+    name = clip.stem if not (start or dur) else f"{clip.stem}_{int(start)}s"
+    store = Store(_variant(name, {"no-ball-tiles": no_ball_tiles}), ROOT / "runs")
     if not store.path("clip.mp4").exists():
         _ffmpeg_cut(clip, store.path("clip.mp4"), start_s=start, dur_s=dur)
-    _pipeline(store, force)
+    _pipeline(store, force, ball_tiles=not no_ball_tiles, upto=upto)
+    if upto:
+        typer.echo(f"wrote {store.dir} (up to {upto})")
 
 
 @app.command()
@@ -245,14 +256,23 @@ def show(
     dur: float = typer.Option(0.0, help="duration (s), 0 = to the end"),
     speed: float = typer.Option(1.0, help="playback speed, e.g. 0.5 for slow motion"),
     out: str = typer.Option("", help="output MP4 (default RUN_DIR/show_<STAGE>.mp4)"),
+    tiles: bool = typer.Option(True, help="detect: draw the ball search tiles"),
+    zoom: bool = typer.Option(True, help="detect: magnified ball inset"),
 ):
     """Debug overlay of a stage on the real clip → 1920×1080 MP4. STAGE: shots (needs the
-    shots.json of `toonball make`)."""
+    shots.json of `toonball make`) or detect (needs `toonball run CLIP --upto detect`; also
+    writes RUN_DIR/stats_detect.json)."""
+    import json
+
     from toonball.render import debug
 
     out = Path(out) if out else run_dir / f"show_{stage}.mp4"
-    debug.render(stage, run_dir, out, start, dur, speed)
+    debug.render(stage, run_dir, out, start, dur, speed, tiles=tiles, zoom=zoom)
     typer.echo(f"wrote {out}")
+    if stage == "detect":
+        st = debug.detect_stats(run_dir)
+        (run_dir / "stats_detect.json").write_text(json.dumps(st, indent=1))
+        typer.echo(json.dumps(st, indent=1))
 
 
 if __name__ == "__main__":
