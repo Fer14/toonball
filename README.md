@@ -178,6 +178,10 @@ URL options:
 | `toonball record RUN_DIR [--theme --layout]` | Render a run to MP4 in headless Chromium (`VIEW="&focus=21"` adds viewer options, `TAG=` names the file, `W=1920 H=1080` sets the size, `MARK=thoth` replaces the TOONBALL pill) |
 | `toonball make VIDEO --no-shots` | Ablation: the whole video as one shot, written to `runs/<video>@no-shots/` |
 | `toonball show shots RUN_DIR [--start --dur --speed --out]` | Debug overlay of the shot splitter on the real video (cut scores, shots, kept parts) → 1920×1080 MP4 |
+| `toonball run CLIP --upto detect` | Only the detection stage; also writes `detections.parquet` (every box before tracking) and `ball_search.parquet` (which tiles were searched for the ball) |
+| `toonball run CLIP --no-ball-tiles` | Ablation: the ball model sees the whole frame once at 1280 px instead of 640 px tiles, written to `runs/<clip>@no-ball-tiles/` |
+| `toonball show detect RUN_DIR [--start --dur --speed --out --no-tiles --no-zoom]` | Debug overlay of detection: boxes by class with confidence, the kept ball, the ball search tiles, a magnified ball inset and a ball-found strip → 1920×1080 MP4, plus `stats_detect.json` |
+| `python scripts/detect_stills.py nms CLIP OUT --frames …` / `ball RUN_DIR OUT` | Stills: boxes before vs after non-max suppression; the ball at full size vs at the 1280 px model input |
 
 Every stage caches its output in `runs/<clip>/` (`people.parquet`, `homography.npy`,
 `pose.parquet`, `state.parquet`, `scene.json`, …), so changing the renderer or the smoothing
