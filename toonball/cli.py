@@ -34,10 +34,31 @@ def _ffmpeg_cut(src: Path, dst: Path, start_f: int | None = None, end_f: int | N
                     "-pix_fmt", "yuv420p", str(dst)], check=True)
 
 
+# stages that don't depend on the tracking: an ablation that only changes tracking starts from
+# a copy of these instead of running the detector again
+TRACK_INPUTS = ("clip.mp4", "people.parquet", "ball_raw.parquet", "keypoints.npy", "crops.npy",
+                "crop_index.parquet", "detections.parquet", "ball_search.parquet", "meta.json",
+                "teams.parquet", "colours.json", "motion.npz", "pose.parquet")
+
+
+def _seed(store, base: Path) -> None:
+    import shutil
+    for name in TRACK_INPUTS:
+        if (base / name).exists() and not store.path(name).exists():
+            shutil.copy2(base / name, store.path(name))
+
+
+def _track_table(tracks) -> pl.DataFrame:
+    """raw ByteTrack id → person track of players.build_tracks (before offscreen.fill)."""
+    rows = [(t.id, int(r), t.role, t.team) for t in tracks for r in t.raw_ids]
+    return pl.DataFrame(rows, schema=["track_id", "raw_id", "role", "team"], orient="row")
+
+
 def _pipeline(store, force: bool = False, pose_on: bool = True, ball_tiles: bool = True,
-              upto: str = "") -> dict:
+              upto: str = "", stitch: bool = True) -> dict:
     """clip.mp4 in a store dir → detections → teams → calibration → world → scene.json.
-    upto="detect" stops after the detection tables."""
+    upto="detect" stops after the detection tables, upto="track" after the person tracks
+    (tracks.parquet: raw ByteTrack id → person). stitch=False: no tracklet stitching/merging."""
     from toonball.calib import camera, homography, motion
     from toonball.detect import run as detect
     from toonball.render.export import export
@@ -60,6 +81,8 @@ def _pipeline(store, force: bool = False, pose_on: bool = True, ball_tiles: bool
     if upto == "detect":
         return {}
     meta = store.json("meta")
+    if meta.get("stitch", True) != stitch:
+        store.put_json("meta", {**meta, "stitch": stitch})
     fps, size = meta["fps"], tuple(meta["size"])
 
     if force or not store.has("teams.parquet", "colours.json"):
@@ -73,6 +96,14 @@ def _pipeline(store, force: bool = False, pose_on: bool = True, ball_tiles: bool
     mo = np.load(store.path("motion.npz"))
     H = homography.fuse(homography.fit_raw(store.np("keypoints")), mo["R"], mo["ok"], size, fps)
     store.put_np("homography", H)
+    if upto == "track":
+        from toonball.track.players import build_tracks
+        tracks = build_tracks(store.df("people"), store.df("teams"), H, size, fps, len(H),
+                              stitch=stitch)
+        store.put_df("tracks", _track_table(tracks))
+        typer.echo(f"  {store.dir.name}: {store.df('people')['track_id'].n_unique()} ByteTrack "
+                   f"ids → {len(tracks)} person tracks")
+        return {}
 
     # full camera (for ball height) only when one tripod position explains the homographies
     cams = camera.estimate(H, size, fps)
@@ -88,7 +119,8 @@ def _pipeline(store, force: bool = False, pose_on: bool = True, ball_tiles: bool
         return classifier.kit_colour(crops[m]) if m.sum() >= 3 else None
 
     w = world.build(store.df("people"), store.df("teams"), store.df("ball_raw"), H, P, fps,
-                    size, store.json("colours"), colour_of)
+                    size, store.json("colours"), colour_of, stitch=stitch)
+    store.put_df("tracks", _track_table(w.tracks))
 
     if pose_on:
         from toonball.pose import angles, estimate
@@ -224,16 +256,21 @@ def run(
     force: bool = typer.Option(False, help="recompute cached stages"),
     no_ball_tiles: bool = typer.Option(False, help="ablation: ball searched in the whole frame "
                                        "at 1280 px instead of 640 px tiles"),
-    upto: str = typer.Option("", help="stop after this stage (detect)"),
+    no_stitch: bool = typer.Option(False, help="ablation: keep every ByteTrack tracklet as its "
+                                   "own person (no _stitch / _merge); reuses the detections"),
+    upto: str = typer.Option("", help="stop after this stage (detect | track)"),
 ):
     """Single continuous shot → scene.json (no cut detection)."""
     from toonball.io.store import Store
 
     name = clip.stem if not (start or dur) else f"{clip.stem}_{int(start)}s"
-    store = Store(_variant(name, {"no-ball-tiles": no_ball_tiles}), ROOT / "runs")
+    store = Store(_variant(name, {"no-ball-tiles": no_ball_tiles, "no-stitch": no_stitch}),
+                  ROOT / "runs")
+    if no_stitch and not force:
+        _seed(store, ROOT / "runs" / _variant(name, {"no-ball-tiles": no_ball_tiles}))
     if not store.path("clip.mp4").exists():
         _ffmpeg_cut(clip, store.path("clip.mp4"), start_s=start, dur_s=dur)
-    _pipeline(store, force, ball_tiles=not no_ball_tiles, upto=upto)
+    _pipeline(store, force, ball_tiles=not no_ball_tiles, upto=upto, stitch=not no_stitch)
     if upto:
         typer.echo(f"wrote {store.dir} (up to {upto})")
 
@@ -258,17 +295,26 @@ def show(
     out: str = typer.Option("", help="output MP4 (default RUN_DIR/show_<STAGE>.mp4)"),
     tiles: bool = typer.Option(True, help="detect: draw the ball search tiles"),
     zoom: bool = typer.Option(True, help="detect: magnified ball inset"),
+    ids: str = typer.Option("final", help="track: final (person tracks) | raw (ByteTrack ids)"),
+    timeline: bool = typer.Option(True, help="track: id timeline at the bottom"),
+    label_scale: float = typer.Option(1.0, help="track: label size, e.g. 1.8 for side by side"),
 ):
     """Debug overlay of a stage on the real clip → 1920×1080 MP4. STAGE: shots (needs the
     shots.json of `toonball make`) or detect (needs `toonball run CLIP --upto detect`; also
-    writes RUN_DIR/stats_detect.json)."""
+    writes RUN_DIR/stats_detect.json) or track (needs `toonball run CLIP --upto track`; also
+    writes RUN_DIR/stats_track.json)."""
     import json
 
     from toonball.render import debug
 
     out = Path(out) if out else run_dir / f"show_{stage}.mp4"
-    debug.render(stage, run_dir, out, start, dur, speed, tiles=tiles, zoom=zoom)
+    debug.render(stage, run_dir, out, start, dur, speed, tiles=tiles, zoom=zoom, ids=ids,
+                 timeline=timeline, label_scale=label_scale)
     typer.echo(f"wrote {out}")
+    if stage == "track":
+        st = debug.track_stats(run_dir)
+        (run_dir / "stats_track.json").write_text(json.dumps(st, indent=1))
+        typer.echo(json.dumps({k: v for k, v in st.items() if k != "joins"}, indent=1))
     if stage == "detect":
         st = debug.detect_stats(run_dir)
         (run_dir / "stats_detect.json").write_text(json.dumps(st, indent=1))

@@ -38,6 +38,18 @@ class DetectOutput:
     size: tuple[int, int]     # w, h
 
 
+def make_tracker(fps: float) -> sv.ByteTrack:
+    """ByteTrack as toonball runs it: a lost track is kept 2 s; a box matches a track when
+    IoU x confidence > 0.2. Boxes below 0.3 are never kept by the detector, so ByteTrack's second
+    (low-confidence) pass has nothing to work with."""
+    return sv.ByteTrack(
+        frame_rate=int(fps),
+        track_activation_threshold=0.3,
+        lost_track_buffer=int(fps * 2),
+        minimum_matching_threshold=0.8,
+    )
+
+
 def _shirt_crop(frame: np.ndarray, box: np.ndarray) -> np.ndarray | None:
     x1, y1, x2, y2 = box.astype(int)
     h, w = y2 - y1, x2 - x1
@@ -87,12 +99,7 @@ def run(
     players, balls, pitch = YOLO(player_w), YOLO(ball_w), YOLO(pitch_w)
 
     origins = _tile_origins(info.width, info.height)
-    tracker = sv.ByteTrack(
-        frame_rate=int(info.fps),
-        track_activation_threshold=0.3,
-        lost_track_buffer=int(info.fps * 2),
-        minimum_matching_threshold=0.8,
-    )
+    tracker = make_tracker(info.fps)
 
     rows, ball_rows, kps, crops, crop_rows = [], [], [], [], []
     det_rows, search_rows = [], []
