@@ -5,8 +5,10 @@
 detect/run.py keeps player boxes from 0.3 up, and ByteTrack's split between "high" and "low"
 boxes is also 0.3, so the second pass (unmatched tracks against boxes of 0.1-0.3) never gets a
 box. This runs the player model again at 0.1 with the same NMS, then ByteTrack twice with
-toonball's settings: on the boxes from 0.3 up (today; checked against people.parquet) and on
-every box from 0.1 up (second pass active). The ball and pitch models are not run.
+toonball's settings: on the boxes from 0.3 up (today) and on every box from 0.1 up (second pass
+active). The ball and pitch models are not run. With --device cpu the model runs in fp32, so its
+boxes differ slightly from the fp16 GPU run in people.parquet; compare the two variants with each
+other.
 """
 
 from __future__ import annotations
