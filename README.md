@@ -175,7 +175,18 @@ URL options:
 |---|---|
 | `toonball make VIDEO [--no-record]` | Full flow for any video: shots → pipeline per shot → render → one MP4 |
 | `toonball run CLIP [--start S --dur D]` | Pipeline on one continuous shot → `runs/<clip>/scene.json` |
-| `toonball record RUN_DIR [--theme --layout]` | Render a run to MP4 in headless Chromium (`VIEW="&focus=21"` adds viewer options, `TAG=` names the file) |
+| `toonball record RUN_DIR [--theme --layout]` | Render a run to MP4 in headless Chromium (`VIEW="&focus=21"` adds viewer options, `TAG=` names the file, `W=1920 H=1080` sets the size, `MARK=thoth` replaces the TOONBALL pill) |
+| `toonball make VIDEO --no-shots` | Ablation: the whole video as one shot, written to `runs/<video>@no-shots/` |
+| `toonball show shots RUN_DIR [--start --dur --speed --out]` | Debug overlay of the shot splitter on the real video (cut scores, shots, kept parts) → 1920×1080 MP4 |
+| `toonball run CLIP --upto detect` | Only the detection stage; also writes `detections.parquet` (every box before tracking) and `ball_search.parquet` (which tiles were searched for the ball) |
+| `toonball run CLIP --no-ball-tiles` | Ablation: the ball model sees the whole frame once at 1280 px instead of 640 px tiles, written to `runs/<clip>@no-ball-tiles/` |
+| `toonball show detect RUN_DIR [--start --dur --speed --out --no-tiles --no-zoom]` | Debug overlay of detection: boxes by class with confidence, the kept ball, the ball search tiles, a magnified ball inset and a ball-found strip → 1920×1080 MP4, plus `stats_detect.json` |
+| `python scripts/detect_stills.py nms CLIP OUT --frames …` / `ball RUN_DIR OUT` | Stills: boxes before vs after non-max suppression; the ball at full size vs at the 1280 px model input |
+| `toonball run CLIP --upto track` | Stops after the person tracks; writes `tracks.parquet` (each ByteTrack id → the person track `track/players.py` puts it in). The full pipeline writes it too |
+| `toonball run CLIP --no-stitch [--upto track]` | Ablation: every ByteTrack tracklet stays its own person (no `_stitch` / `_merge`), written to `runs/<clip>@no-stitch/`; starts from a copy of the run's detections, so the detector is not run again |
+| `toonball show track RUN_DIR [--ids raw] [--start --dur --speed --out --label-scale --no-timeline]` | Debug overlay of tracking: one colour and label per id with a trail, NEW ID / LOST (ByteTrack's Kalman guess while unmatched, up to 2 s) / FOUND AGAIN / GONE / ID CHANGE / JOINED markers, the id count and an id timeline. `--ids raw` draws ByteTrack's own ids → 1920×1080 MP4, plus `stats_track.json` |
+| `python scripts/track_stills.py iou RUN_DIR OUT --frame T --around ID` / `occlusion RUN_DIR OUT --old A --new B` | Stills: two consecutive frames with the tracks' guesses, the new boxes, every IoU and the Hungarian matches (+ matrix, JSON); a player lost and back under a new id |
+| `python scripts/second_pass.py RUN_DIR OUT.json` | Experiment: runs the player model again at 0.1 and ByteTrack with and without its low-confidence second pass |
 
 Every stage caches its output in `runs/<clip>/` (`people.parquet`, `homography.npy`,
 `pose.parquet`, `state.parquet`, `scene.json`, …), so changing the renderer or the smoothing
@@ -200,8 +211,8 @@ toonball/
   calib/     pitch.py (105×68 m model), homography.py, motion.py, camera.py
   team/      classifier.py (SigLIP → UMAP → k-means, kit colours)
   pose/      estimate.py (2D), lift.py (3D lifters), angles.py (gait phase), magf/ (MotionAGFormer)
-  track/     players.py, offscreen.py (full teams), ball.py, world.py
-  render/    export.py (scene.json)
+  track/     players.py, offscreen.py (full teams), ball.py, world.py, replay.py (ByteTrack replayed)
+  render/    export.py (scene.json), debug.py (toonball show overlays)
   cli.py     toonball make | run | record
 viewer/      index.html, game.js (Three.js game world)
 scripts/     get_data.sh, record.mjs (frame-by-frame capture → MP4)

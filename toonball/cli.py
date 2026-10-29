@@ -1,4 +1,4 @@
-"""toonball make | run | record."""
+"""toonball make | run | record | show."""
 
 from __future__ import annotations
 
@@ -17,6 +17,12 @@ MAX_W = 1920  # shots are re-encoded to at most this width
 LIFTER = os.environ.get("TOONBALL_LIFTER", "motionagformer")  # or "videopose3d"
 
 
+def _variant(name: str, flags: dict[str, bool]) -> str:
+    """Ablations ("before" clips) write to runs/<clip>@<variant>/ so cached stages are kept."""
+    on = [k for k, v in flags.items() if v]
+    return f"{name}@{'+'.join(on)}" if on else name
+
+
 def _ffmpeg_cut(src: Path, dst: Path, start_f: int | None = None, end_f: int | None = None,
                 start_s: float = 0.0, dur_s: float = 0.0) -> None:
     vf = [f"scale='min({MAX_W},iw)':-2"]
@@ -28,8 +34,31 @@ def _ffmpeg_cut(src: Path, dst: Path, start_f: int | None = None, end_f: int | N
                     "-pix_fmt", "yuv420p", str(dst)], check=True)
 
 
-def _pipeline(store, force: bool = False, pose_on: bool = True) -> dict:
-    """clip.mp4 in a store dir → detections → teams → calibration → world → scene.json."""
+# stages that don't depend on the tracking: an ablation that only changes tracking starts from
+# a copy of these instead of running the detector again
+TRACK_INPUTS = ("clip.mp4", "people.parquet", "ball_raw.parquet", "keypoints.npy", "crops.npy",
+                "crop_index.parquet", "detections.parquet", "ball_search.parquet", "meta.json",
+                "teams.parquet", "colours.json", "motion.npz", "pose.parquet")
+
+
+def _seed(store, base: Path) -> None:
+    import shutil
+    for name in TRACK_INPUTS:
+        if (base / name).exists() and not store.path(name).exists():
+            shutil.copy2(base / name, store.path(name))
+
+
+def _track_table(tracks) -> pl.DataFrame:
+    """raw ByteTrack id → person track of players.build_tracks (before offscreen.fill)."""
+    rows = [(t.id, int(r), t.role, t.team) for t in tracks for r in t.raw_ids]
+    return pl.DataFrame(rows, schema=["track_id", "raw_id", "role", "team"], orient="row")
+
+
+def _pipeline(store, force: bool = False, pose_on: bool = True, ball_tiles: bool = True,
+              upto: str = "", stitch: bool = True) -> dict:
+    """clip.mp4 in a store dir → detections → teams → calibration → world → scene.json.
+    upto="detect" stops after the detection tables, upto="track" after the person tracks
+    (tracks.parquet: raw ByteTrack id → person). stitch=False: no tracklet stitching/merging."""
     from toonball.calib import camera, homography, motion
     from toonball.detect import run as detect
     from toonball.render.export import export
@@ -40,14 +69,20 @@ def _pipeline(store, force: bool = False, pose_on: bool = True) -> dict:
     if force or not store.has("people.parquet", "keypoints.npy"):
         d = detect.run(str(video), str(WEIGHTS / "football-player-detection.pt"),
                        str(WEIGHTS / "football-ball-detection.pt"),
-                       str(WEIGHTS / "football-pitch-detection.pt"))
+                       str(WEIGHTS / "football-pitch-detection.pt"), ball_tiles=ball_tiles)
         store.put_df("people", d.people)
         store.put_df("ball_raw", d.ball)
         store.put_np("keypoints", d.keypoints)
         store.put_np("crops", d.crops)
         store.put_df("crop_index", d.crop_index)
-        store.put_json("meta", {"fps": d.fps, "size": list(d.size)})
+        store.put_df("detections", d.detections)
+        store.put_df("ball_search", d.ball_search)
+        store.put_json("meta", {"fps": d.fps, "size": list(d.size), "ball_tiles": ball_tiles})
+    if upto == "detect":
+        return {}
     meta = store.json("meta")
+    if meta.get("stitch", True) != stitch:
+        store.put_json("meta", {**meta, "stitch": stitch})
     fps, size = meta["fps"], tuple(meta["size"])
 
     if force or not store.has("teams.parquet", "colours.json"):
@@ -61,6 +96,14 @@ def _pipeline(store, force: bool = False, pose_on: bool = True) -> dict:
     mo = np.load(store.path("motion.npz"))
     H = homography.fuse(homography.fit_raw(store.np("keypoints")), mo["R"], mo["ok"], size, fps)
     store.put_np("homography", H)
+    if upto == "track":
+        from toonball.track.players import build_tracks
+        tracks = build_tracks(store.df("people"), store.df("teams"), H, size, fps, len(H),
+                              stitch=stitch)
+        store.put_df("tracks", _track_table(tracks))
+        typer.echo(f"  {store.dir.name}: {store.df('people')['track_id'].n_unique()} ByteTrack "
+                   f"ids → {len(tracks)} person tracks")
+        return {}
 
     # full camera (for ball height) only when one tripod position explains the homographies
     cams = camera.estimate(H, size, fps)
@@ -76,7 +119,8 @@ def _pipeline(store, force: bool = False, pose_on: bool = True) -> dict:
         return classifier.kit_colour(crops[m]) if m.sum() >= 3 else None
 
     w = world.build(store.df("people"), store.df("teams"), store.df("ball_raw"), H, P, fps,
-                    size, store.json("colours"), colour_of)
+                    size, store.json("colours"), colour_of, stitch=stitch)
+    store.put_df("tracks", _track_table(w.tracks))
 
     if pose_on:
         from toonball.pose import angles, estimate
@@ -153,18 +197,27 @@ def make(
     min_shot: float = typer.Option(3.0, help="shortest wide shot kept (s)"),
     force: bool = typer.Option(False, help="recompute cached stages"),
     record: bool = typer.Option(True, help="render MP4s (off: only scene.json for the viewer)"),
+    no_shots: bool = typer.Option(False, help="ablation: the whole video is one shot"),
 ):
     """Any football video → cartoon video. Cuts, replays and close-ups are skipped."""
     from toonball.io import shots
     from toonball.io.store import Store
 
-    top = Store(video, ROOT / "runs")
-    if force or not top.has("shots.json"):
+    top = Store(_variant(video.stem, {"no-shots": no_shots}), ROOT / "runs")
+    if no_shots and (force or not top.has("shots.json")):
+        import cv2
+        cap = cv2.VideoCapture(str(video))
+        fps, n = cap.get(cv2.CAP_PROP_FPS) or 25.0, int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+        size = [int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))]
+        cap.release()
+        top.put_json("shots", {"video": str(video), "fps": fps, "n_frames": n, "size": size,
+                               "cuts": [0, n], "wide": [{"start": 0, "end": n}]})
+    elif force or not top.has("shots.json"):
         cuts, kps, sampled, n, fps, size = shots.prepass(
             str(video), str(WEIGHTS / "football-pitch-detection.pt"))
         wide = shots.wide_shots(cuts, kps, sampled, fps, size, min_s=min_shot)
-        top.put_json("shots", {"fps": fps, "n_frames": n, "size": list(size), "cuts": cuts,
-                               "wide": wide})
+        top.put_json("shots", {"video": str(video), "fps": fps, "n_frames": n,
+                               "size": list(size), "cuts": cuts, "wide": wide})
     info = top.json("shots")
     wide = info["wide"]
     kept = sum(s["end"] - s["start"] for s in wide) / info["fps"]
@@ -201,15 +254,25 @@ def run(
     start: float = typer.Option(0.0, help="start time (s); clip is cut to [start, start+dur]"),
     dur: float = typer.Option(0.0, help="duration (s), 0 = whole clip"),
     force: bool = typer.Option(False, help="recompute cached stages"),
+    no_ball_tiles: bool = typer.Option(False, help="ablation: ball searched in the whole frame "
+                                       "at 1280 px instead of 640 px tiles"),
+    no_stitch: bool = typer.Option(False, help="ablation: keep every ByteTrack tracklet as its "
+                                   "own person (no _stitch / _merge); reuses the detections"),
+    upto: str = typer.Option("", help="stop after this stage (detect | track)"),
 ):
     """Single continuous shot → scene.json (no cut detection)."""
     from toonball.io.store import Store
 
-    store = Store(clip.stem if not (start or dur) else f"{clip.stem}_{int(start)}s",
+    name = clip.stem if not (start or dur) else f"{clip.stem}_{int(start)}s"
+    store = Store(_variant(name, {"no-ball-tiles": no_ball_tiles, "no-stitch": no_stitch}),
                   ROOT / "runs")
+    if no_stitch and not force:
+        _seed(store, ROOT / "runs" / _variant(name, {"no-ball-tiles": no_ball_tiles}))
     if not store.path("clip.mp4").exists():
         _ffmpeg_cut(clip, store.path("clip.mp4"), start_s=start, dur_s=dur)
-    _pipeline(store, force)
+    _pipeline(store, force, ball_tiles=not no_ball_tiles, upto=upto, stitch=not no_stitch)
+    if upto:
+        typer.echo(f"wrote {store.dir} (up to {upto})")
 
 
 @app.command()
@@ -220,6 +283,42 @@ def record(
 ):
     """Render a run's scene.json in headless Chromium and mux with the source footage."""
     typer.echo(f"wrote {_record(run_dir, theme, layout)}")
+
+
+@app.command()
+def show(
+    stage: str,
+    run_dir: Path,
+    start: float = typer.Option(0.0, help="start time (s)"),
+    dur: float = typer.Option(0.0, help="duration (s), 0 = to the end"),
+    speed: float = typer.Option(1.0, help="playback speed, e.g. 0.5 for slow motion"),
+    out: str = typer.Option("", help="output MP4 (default RUN_DIR/show_<STAGE>.mp4)"),
+    tiles: bool = typer.Option(True, help="detect: draw the ball search tiles"),
+    zoom: bool = typer.Option(True, help="detect: magnified ball inset"),
+    ids: str = typer.Option("final", help="track: final (person tracks) | raw (ByteTrack ids)"),
+    timeline: bool = typer.Option(True, help="track: id timeline at the bottom"),
+    label_scale: float = typer.Option(1.0, help="track: label size, e.g. 1.8 for side by side"),
+):
+    """Debug overlay of a stage on the real clip → 1920×1080 MP4. STAGE: shots (needs the
+    shots.json of `toonball make`) or detect (needs `toonball run CLIP --upto detect`; also
+    writes RUN_DIR/stats_detect.json) or track (needs `toonball run CLIP --upto track`; also
+    writes RUN_DIR/stats_track.json)."""
+    import json
+
+    from toonball.render import debug
+
+    out = Path(out) if out else run_dir / f"show_{stage}.mp4"
+    debug.render(stage, run_dir, out, start, dur, speed, tiles=tiles, zoom=zoom, ids=ids,
+                 timeline=timeline, label_scale=label_scale)
+    typer.echo(f"wrote {out}")
+    if stage == "track":
+        st = debug.track_stats(run_dir)
+        (run_dir / "stats_track.json").write_text(json.dumps(st, indent=1))
+        typer.echo(json.dumps({k: v for k, v in st.items() if k != "joins"}, indent=1))
+    if stage == "detect":
+        st = debug.detect_stats(run_dir)
+        (run_dir / "stats_detect.json").write_text(json.dumps(st, indent=1))
+        typer.echo(json.dumps(st, indent=1))
 
 
 if __name__ == "__main__":
