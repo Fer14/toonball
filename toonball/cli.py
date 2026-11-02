@@ -309,12 +309,23 @@ def show(
     shots.json of `toonball make`) or detect (needs `toonball run CLIP --upto detect`; also
     writes RUN_DIR/stats_detect.json) or track (needs `toonball run CLIP --upto track`; also
     writes RUN_DIR/stats_track.json) or pitch (needs homography.npy; also writes
-    RUN_DIR/stats_pitch.json)."""
+    RUN_DIR/stats_pitch.json) or motion (optical flow on the background, players masked, and
+    the frame-to-frame camera motion; needs motion.npz) or fusion (pitch lines from the raw fit,
+    camera motion alone and the fused homography; needs homography_raw.npy). motion and fusion
+    also write RUN_DIR/stats_motion.json."""
     import json
 
     from toonball.render import debug
 
     out = Path(out) if out else run_dir / f"show_{stage}.mp4"
+    if stage in ("motion", "fusion"):
+        from toonball.render import debug_motion
+        debug_motion.render(stage, run_dir, out, start, dur, speed)
+        typer.echo(f"wrote {out}")
+        st = debug_motion.stats(run_dir)
+        (run_dir / "stats_motion.json").write_text(json.dumps(st, indent=1))
+        typer.echo(json.dumps(st, indent=1))
+        return
     debug.render(stage, run_dir, out, start, dur, speed, tiles=tiles, zoom=zoom, ids=ids,
                  timeline=timeline, label_scale=label_scale, hom=hom, lines=lines,
                  keypoints=keypoints, radar=radar)
