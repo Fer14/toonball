@@ -1061,6 +1061,12 @@ const goalEl = document.getElementById("goal");
 document.getElementById("chip0").style.background = scene_.teams[0];
 document.getElementById("chip1").style.background = scene_.teams[1];
 if (THEME === "toy") document.getElementById("brand").textContent = "TOY BOX FOOTBALL";
+// mark=thoth: the channel's mark in place of the TOONBALL pill (series recordings)
+if (P.get("mark")) {
+  const brand = document.getElementById("brand");
+  brand.textContent = P.get("mark").toUpperCase();
+  brand.classList.add("mark");
+}
 
 const camPos = new THREE.Vector3(), camTarget = new THREE.Vector3();
 const smoothPos = new THREE.Vector3(), smoothTarget = new THREE.Vector3();

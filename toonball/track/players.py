@@ -196,9 +196,11 @@ def _near_edge(poly: np.ndarray | None, x: float, y: float, margin: float = 4.0)
 def build_tracks(people: pl.DataFrame, teams: pl.DataFrame, H: np.ndarray,
                  size: tuple[int, int], fps: float, n_frames: int,
                  colour_of: Callable[[list[int]], str | None] | None = None,
-                 min_len: int = 8) -> list[Track]:
+                 min_len: int = 8, stitch: bool = True) -> list[Track]:
+    """stitch=False is the ablation: every ByteTrack tracklet stays its own person."""
     df = project_people(people, H)
-    chains = _stitch(_segments(df, teams, min_len), fps)
+    segs = _segments(df, teams, min_len)
+    chains = _stitch(segs, fps) if stitch else segs
     chains = [c for c in chains if len(c["f"]) >= int(0.6 * fps)]  # drop flickers
 
     # team sides: which team stands closer to each goal on average
