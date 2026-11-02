@@ -9,23 +9,42 @@ from scipy.signal import savgol_filter
 from toonball.calib import pitch
 
 
+def fit_frame(kp: np.ndarray, min_conf: float = 0.5, min_pts: int = 4,
+              max_err_m: float = 1.5) -> dict:
+    """One frame's (32, 3) keypoints → {"H", "used" (32,) bool, "inliers" (32,) bool,
+    "err_m" (32,) metres, "median_err_m", "reason"}; H is None when the fit is rejected
+    (reason: "few points", "ransac", "error")."""
+    ref = pitch.vertices().astype(np.float64)
+    m = kp[:, 2] > min_conf
+    out = {"H": None, "used": m, "inliers": np.zeros(len(kp), bool),
+           "err_m": np.full(len(kp), np.nan), "median_err_m": np.nan, "reason": "few points"}
+    if m.sum() < min_pts:
+        return out
+    src, dst = kp[m, :2].astype(np.float64), ref[m]
+    h, inl = cv2.findHomography(src, dst, cv2.RANSAC, 1.0)
+    if h is None or inl.sum() < min_pts:
+        out["reason"] = "ransac"
+        return out
+    out["inliers"][np.flatnonzero(m)] = inl.ravel().astype(bool)
+    proj = cv2.perspectiveTransform(src[None], h)[0]
+    err = np.linalg.norm(proj - dst, axis=1)
+    out["err_m"][m] = err
+    out["median_err_m"] = float(np.median(err))
+    out["H"] = h
+    out["reason"] = "error" if out["median_err_m"] > max_err_m else ""
+    if out["reason"]:
+        out["H"] = None
+    return out
+
+
 def fit_raw(keypoints: np.ndarray, min_conf: float = 0.5, min_pts: int = 4,
             max_err_m: float = 1.5) -> np.ndarray:
     """(F, 32, 3) keypoints → (F, 3, 3) homographies, NaN where rejected."""
-    ref = pitch.vertices()
     H = np.full((len(keypoints), 3, 3), np.nan, np.float64)
     for f, kp in enumerate(keypoints):
-        m = kp[:, 2] > min_conf
-        if m.sum() < min_pts:
-            continue
-        src, dst = kp[m, :2].astype(np.float64), ref[m].astype(np.float64)
-        h, inl = cv2.findHomography(src, dst, cv2.RANSAC, 1.0)
-        if h is None or inl.sum() < min_pts:
-            continue
-        proj = cv2.perspectiveTransform(src[None], h)[0]
-        if np.median(np.linalg.norm(proj - dst, axis=1)) > max_err_m:
-            continue
-        H[f] = h
+        h = fit_frame(kp, min_conf, min_pts, max_err_m)["H"]
+        if h is not None:
+            H[f] = h
     return H
 
 

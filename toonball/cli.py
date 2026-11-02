@@ -94,7 +94,9 @@ def _pipeline(store, force: bool = False, pose_on: bool = True, ball_tiles: bool
         R, R_ok = motion.estimate(str(video), store.df("people"))
         np.savez(store.path("motion.npz"), R=R, ok=R_ok)
     mo = np.load(store.path("motion.npz"))
-    H = homography.fuse(homography.fit_raw(store.np("keypoints")), mo["R"], mo["ok"], size, fps)
+    H_raw = homography.fit_raw(store.np("keypoints"))
+    store.put_np("homography_raw", H_raw)  # per-frame keypoint fits before fusion (ch04/05)
+    H = homography.fuse(H_raw, mo["R"], mo["ok"], size, fps)
     store.put_np("homography", H)
     if upto == "track":
         from toonball.track.players import build_tracks
@@ -298,23 +300,34 @@ def show(
     ids: str = typer.Option("final", help="track: final (person tracks) | raw (ByteTrack ids)"),
     timeline: bool = typer.Option(True, help="track: id timeline at the bottom"),
     label_scale: float = typer.Option(1.0, help="track: label size, e.g. 1.8 for side by side"),
+    hom: str = typer.Option("fused", help="pitch: fused (final homography) | raw (per-frame fit)"),
+    lines: bool = typer.Option(True, help="pitch: projected pitch lines"),
+    keypoints: bool = typer.Option(True, help="pitch: detected keypoints with their ids"),
+    radar: bool = typer.Option(True, help="pitch: top-down radar"),
 ):
     """Debug overlay of a stage on the real clip → 1920×1080 MP4. STAGE: shots (needs the
     shots.json of `toonball make`) or detect (needs `toonball run CLIP --upto detect`; also
     writes RUN_DIR/stats_detect.json) or track (needs `toonball run CLIP --upto track`; also
-    writes RUN_DIR/stats_track.json)."""
+    writes RUN_DIR/stats_track.json) or pitch (needs homography.npy; also writes
+    RUN_DIR/stats_pitch.json)."""
     import json
 
     from toonball.render import debug
 
     out = Path(out) if out else run_dir / f"show_{stage}.mp4"
     debug.render(stage, run_dir, out, start, dur, speed, tiles=tiles, zoom=zoom, ids=ids,
-                 timeline=timeline, label_scale=label_scale)
+                 timeline=timeline, label_scale=label_scale, hom=hom, lines=lines,
+                 keypoints=keypoints, radar=radar)
     typer.echo(f"wrote {out}")
     if stage == "track":
         st = debug.track_stats(run_dir)
         (run_dir / "stats_track.json").write_text(json.dumps(st, indent=1))
         typer.echo(json.dumps({k: v for k, v in st.items() if k != "joins"}, indent=1))
+    if stage == "pitch":
+        from toonball.render import debug_pitch
+        st = debug_pitch.stats(run_dir)
+        (run_dir / "stats_pitch.json").write_text(json.dumps(st, indent=1))
+        typer.echo(json.dumps(st, indent=1))
     if stage == "detect":
         st = debug.detect_stats(run_dir)
         (run_dir / "stats_detect.json").write_text(json.dumps(st, indent=1))

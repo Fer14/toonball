@@ -14,6 +14,8 @@ for explaining and checking a stage. `toonball show STAGE RUN_DIR`.
   (ByteTrack ids that track/players.py joins) and JOINED / MERGED markers; the id count and an
   id timeline.
   ids="raw" draws ByteTrack's ids, ids="final" the person tracks of tracks.parquet.
+- pitch: keypoints, projected pitch lines, reprojection error and a top-down radar
+  (render/debug_pitch.py); hom="raw" for the per-frame keypoint fits before fusion.
 """
 
 from __future__ import annotations
@@ -694,7 +696,7 @@ def track_stats(run_dir: Path) -> dict:
     }
 
 
-STAGES = {"shots": _shots, "detect": _detect, "track": _track}
+STAGES = {"shots": _shots, "detect": _detect, "track": _track, "pitch": None}
 
 
 def render(stage: str, run_dir: Path, out: Path, start: float = 0.0, dur: float = 0.0,
@@ -707,6 +709,11 @@ def render(stage: str, run_dir: Path, out: Path, start: float = 0.0, dur: float 
         n, fps = info["n_frames"], info["fps"]
         score = _shot_scores(video, n)
         draw = lambda img, f: _shots(img, f, info, score)
+    elif stage == "pitch":
+        from toonball.render import debug_pitch
+        ctx = debug_pitch.load(run_dir, opts.get("hom", "fused"))
+        video, n, fps = run_dir / "clip.mp4", ctx["n"], ctx["fps"]
+        draw = lambda img, f: debug_pitch.draw(img, f, ctx, opts)
     elif stage == "track":
         ctx = _load_track(run_dir, opts.get("ids", "final"))
         video, n, fps = run_dir / "clip.mp4", ctx["n"], ctx["fps"]
